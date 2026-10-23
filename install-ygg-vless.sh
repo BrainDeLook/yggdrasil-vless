@@ -11,7 +11,7 @@ SB_VERSION=1.14.3
 INSTALLER_VERSION=1.1.0
 MODE=install
 PORT=''
-NAME=''
+NODE_NAME=''
 REALITY_SERVER=''
 ASSUME_YES=0
 INSTALL_LOG=''
@@ -45,10 +45,10 @@ configure_wizard() {
         printf '  Старую ссылку без Reality потребуется заменить новой.\n' >&3
     fi
     if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
-        if [[ -z "$NAME" ]]; then
+        if [[ -z "$NODE_NAME" ]]; then
             printf '\n  Название подключения [%s]: ' "$old_name" >&3
             IFS= read -r answer
-            NAME=${answer:-$old_name}
+            NODE_NAME=${answer:-$old_name}
         fi
         if [[ -z "$PORT" ]]; then
             while true; do
@@ -60,12 +60,12 @@ configure_wizard() {
             done
         fi
     fi
-    NAME=${NAME:-$old_name}
+    NODE_NAME=${NODE_NAME:-$old_name}
     PORT=${PORT:-$old_port}
     REALITY_SERVER=${REALITY_SERVER:-$old_reality}
-    [[ -n "${NAME// /}" && ${#NAME} -le 240 && "$NAME" != *$'\n'* && "$NAME" != *$'\r'* ]] || die 'Название должно содержать от 1 до 240 байт без переноса строки'
+    [[ -n "${NODE_NAME// /}" && ${#NODE_NAME} -le 240 && "$NODE_NAME" != *$'\n'* && "$NODE_NAME" != *$'\r'* ]] || die 'Укажите короткое непустое название без переноса строки'
     [[ "$REALITY_SERVER" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$ ]] || die 'Укажите доменное имя для Reality без https:// и порта'
-    printf '\n  Подключение: %s\n  Протокол:    VLESS + Reality (TCP)\n  Порт:        %s\n' "$NAME" "$PORT" >&3
+    printf '\n  Подключение: %s\n  Протокол:    VLESS + Reality (TCP)\n  Порт:        %s\n' "$NODE_NAME" "$PORT" >&3
 }
 detect_ygg_config() {
     # The packaged unit is authoritative; old releases used /etc/yggdrasil.conf.
@@ -96,7 +96,7 @@ while (($#)); do
         --status) MODE=status; shift ;;
         --test) MODE=test; shift ;;
         --tachyon) MODE=tachyon; shift ;;
-        --name) [[ $# -ge 2 ]] || die 'Не указано название после --name'; NAME=$2; shift 2 ;;
+        --name) [[ $# -ge 2 ]] || die 'Не указано название после --name'; NODE_NAME=$2; shift 2 ;;
         --reality-server) [[ $# -ge 2 ]] || die 'Не указан домен после --reality-server'; REALITY_SERVER=$2; shift 2 ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         --port) [[ $# -ge 2 ]] || die 'Не указан порт после --port'; PORT=$2; shift 2 ;;
@@ -347,7 +347,7 @@ timeout 20 openssl s_client -connect "$REALITY_SERVER:443" -servername "$REALITY
     cat "$TMP/reality-handshake.log"
     die "Сервер Reality $REALITY_SERVER недоступен по TLS 1.3. Укажите другой через --reality-server ДОМЕН"
 }
-python3 - "$BASE" "$TMP" "$ADDRESS" "$PORT" "$NAME" "$REALITY_SERVER" <<'PY'
+python3 - "$BASE" "$TMP" "$ADDRESS" "$PORT" "$NODE_NAME" "$REALITY_SERVER" <<'PY'
 import json,sys,uuid,pathlib,subprocess,re,secrets,os
 from urllib.parse import urlencode,quote
 base,tmp=map(pathlib.Path,sys.argv[1:3]); addr=sys.argv[3]; port=sys.argv[4]
@@ -455,10 +455,10 @@ INSTALL_LOG="/var/log/ygg-vless/install-$(date -u +%Y%m%dT%H%M%S)-$$.log"
 : >"$INSTALL_LOG"
 printf '\n  Журнал установки: %s\n' "$INSTALL_LOG" >&3
 perform_install >>"$INSTALL_LOG" 2>&1
-printf '\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  ГОТОВО — %s\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' "$NAME" >&3
+printf '\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  ГОТОВО — %s\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' "$NODE_NAME" >&3
 printf '  Ссылка для INCY / Xray / sing-box и других VLESS Reality клиентов:\n\n' >&3
 cat "$BASE/client.txt" >&3
-printf '\n  Название: %s\n  Адрес Yggdrasil: %s\n  Порт: %s\n' "$NAME" "$ADDRESS" "$PORT" >&3
+printf '\n  Название: %s\n  Адрес Yggdrasil: %s\n  Порт: %s\n' "$NODE_NAME" "$ADDRESS" "$PORT" >&3
 printf '\n  Тахион: нужен JSON с привязкой к интерфейсу Yggdrasil.\n  Получить его: sudo ygg-vless --tachyon\n\n' >&3
 printf '  Показать ссылку: sudo ygg-vless --show-link\n  Проверить ноду:  sudo ygg-vless --test\n  Статус:          sudo ygg-vless --status\n  Журнал:          %s\n\n' "$INSTALL_LOG" >&3
 printf '  На клиентском устройстве должен работать маршрут через Yggdrasil.\n  После обновления замените старую ссылку новой.\n' >&3
