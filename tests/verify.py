@@ -30,6 +30,16 @@ for value in ['/usr/bin/yggdrasil -autoconf', '/usr/bin/yggdrasil -useconffile $
 print('PASS: packaged/legacy/custom systemd config paths detected; ambiguous unit rejected')
 scratch=tempfile.TemporaryDirectory(prefix='ygg-vless-verify-')
 work=Path(scratch.name)
+admin_restore=next(b for b in blocks if 'original=json.loads(raw)' in b)
+for raw,expected in [
+    ('{\n AdminListen: unix:///run/custom.sock # comment\n}', 'unix:///run/custom.sock'),
+    ('{\n // AdminListen: unix:///wrong.sock\n AdminListen: "unix:///run/right.sock"\n}', 'unix:///run/right.sock'),
+    ('{"AdminListen":"unix:///run/json.sock"}', 'unix:///run/json.sock')]:
+    original=work/'original-admin.conf'; normalized=work/'normalized-admin.json'
+    original.write_text(raw); normalized.write_text('{"AdminListen":""}')
+    subprocess.run([sys.executable,'-c',admin_restore,str(original),str(normalized)],check=True)
+    assert json.loads(normalized.read_text())['AdminListen']==expected
+print('PASS: explicit admin socket retained from JSON and HJSON, ignoring comments')
 def runblock(marker,args):
     code=next(b for b in blocks if marker in b)
     subprocess.run([sys.executable,'-c',code,*map(str,args)],check=True)

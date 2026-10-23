@@ -162,7 +162,7 @@ fi
 log "Installing dependencies ($ID, $ARCH)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl jq python3 python3-hjson iproute2 iputils-ping tar coreutils kmod util-linux passwd
+apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd
 modprobe tun 2>/dev/null || true
 [[ -c /dev/net/tun ]] || die '/dev/net/tun unavailable; enable TUN in the VPS/container control panel'
 install -d -m 700 "$BASE" "$BASE/backups"
@@ -200,8 +200,17 @@ else
     # Yggdrasil 0.5.14 deliberately clears AdminListen in -normaliseconf output.
     # Restore an explicitly configured socket from the original HJSON/JSON file.
     python3 - "$YGG_CONFIG" "$TMP/ygg-original.json" <<'PY'
-import hjson,json,sys
-with open(sys.argv[1]) as f: original=hjson.load(f)
+import json,re,sys
+with open(sys.argv[1]) as f: raw=f.read()
+try:
+    original=json.loads(raw)
+except json.JSONDecodeError:
+    # Read only this scalar; the Yggdrasil binary parses the rest of HJSON.
+    original={}
+    m=re.search(r'(?m)^[ \t]*(?:AdminListen|"AdminListen")[ \t]*:[ \t]*("(?:[^"\\]|\\.)*"|[^\r\n]*)',raw)
+    if m:
+        value=m.group(1).strip()
+        original['AdminListen']=json.loads(value) if value.startswith('"') else re.split(r'\s+(?://|#)',value,maxsplit=1)[0].rstrip(',').strip()
 with open(sys.argv[2]) as f: normalized=json.load(f)
 if 'AdminListen' in original: normalized['AdminListen']=original['AdminListen']
 with open(sys.argv[2],'w') as f: json.dump(normalized,f,indent=2)
