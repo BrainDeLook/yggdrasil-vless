@@ -9,11 +9,12 @@ import time
 
 source=(Path(__file__).resolve().parents[1]/'install-ygg-vless.sh').read_text()
 wizard=source[source.index('normalize_access() {'):source.index('detect_ygg_config() {')]
+styles=source[source.index("C_RESET=''"):source.index('log() {')]
 with tempfile.TemporaryDirectory(prefix='ygg-wizard-') as d:
     script=Path(d)/'wizard.sh'
-    script.write_text('set -eu\nexec 3>&1\nBASE='+d+'\nNODE_NAME=""\nPORT=""\nREALITY_SERVER=""\nC_RESET="" C_CYAN="" C_YELLOW="" C_BOLD=""\nALLOW_IPS=()\nASSUME_YES=0\nINSTALLER_VERSION=test\ndie(){ echo "$*"; exit 1; }\n'+wizard+'\nconfigure_wizard\nprintf "RESULT:%s:%s\\n" "$NODE_NAME" "$PORT"\n')
+    script.write_text('set -eu\nexec 3>&1\n'+styles+'\nBASE='+d+'\nNODE_NAME=""\nPORT=""\nREALITY_SERVER=""\nALLOW_IPS=()\nASSUME_YES=0\nINSTALLER_VERSION=test\ndie(){ echo "$*"; exit 1; }\n'+wizard+'\nconfigure_wizard\nprintf "RESULT:%s:%s\\n" "$NODE_NAME" "$PORT"\n')
     primary,secondary=pty.openpty()
-    p=subprocess.Popen(['bash',str(script)],stdin=secondary,stdout=secondary,stderr=secondary)
+    p=subprocess.Popen(['bash',str(script)],stdin=secondary,stdout=secondary,stderr=secondary,env={k:v for k,v in dict(os.environ,TERM='xterm-256color').items() if k!='NO_COLOR'})
     os.close(secondary)
     data=b''
     try:
@@ -29,10 +30,11 @@ with tempfile.TemporaryDirectory(prefix='ygg-wizard-') as d:
         p.wait(timeout=2)
         output=data.decode(errors='replace')
         assert p.returncode==0,output
+        assert '\x1b[36m' in output and '\x1b[33m' in output and '\x1b[0m' in output,output
         assert 'Название подключения' in output and 'Введите целое число' in output,output
         assert 'Ошибка списка доступа' in output and 'IPv6-PD' in output,output
         assert 'RESULT:Моя нода NL:2443' in output,output
-        print('PASS: interactive wizard accepts Cyrillic name, rejects invalid port and accepts corrected port')
+        print('PASS: interactive wizard accepts Cyrillic name, rejects invalid port and accepts corrected port, validates LAN prefix and emits terminal colors')
     finally:
         if p.poll() is None: p.kill(); p.wait()
         os.close(primary)
