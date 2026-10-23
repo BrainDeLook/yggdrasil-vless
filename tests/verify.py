@@ -1,0 +1,114 @@
+import contextlib
+import http.server
+import json
+import os
+from pathlib import Path
+import re
+import socket
+import subprocess
+import sys
+import threading
+import time
+import tempfile
+import urllib.request
+
+root=Path(__file__).resolve().parents[1]
+script=(root/'install-ygg-vless.sh').read_text(encoding='utf-8')
+blocks=re.findall(r"<<'PY'\n(.*?)\nPY", script, re.S)
+for i, block in enumerate(blocks): compile(block, f'embedded-{i}', 'exec')
+print(f'PASS: {len(blocks)} embedded Python programs compile')
+scratch=tempfile.TemporaryDirectory(prefix='ygg-vless-verify-')
+work=Path(scratch.name)
+def runblock(marker,args):
+    code=next(b for b in blocks if marker in b)
+    subprocess.run([sys.executable,'-c',code,*map(str,args)],check=True)
+
+ygg_original=work/'ygg-original.json'; ygg_out=work/'ygg.json'
+identity='ab'*64
+ygg_original.write_text(json.dumps({'PrivateKey':identity,'Peers':[],'IfName':'auto','AdminListen':''}))
+runblock('c=json.load(open(sys.argv[1])); peers=',[ygg_original,ygg_out])
+c=json.loads(ygg_out.read_text()); assert c['PrivateKey']==identity and len(c['Peers'])==3
+ygg_original.write_text(json.dumps(c)); runblock('c=json.load(open(sys.argv[1])); peers=',[ygg_original,ygg_out])
+assert json.loads(ygg_out.read_text())==c
+runblock('c=json.load(open(sys.argv[1])); peers=',[ygg_original,ygg_out,'tls://example.org:443'])
+assert json.loads(ygg_out.read_text())['Peers']==['tls://example.org:443']
+print('PASS: Yggdrasil identity/peers preserved; explicit peer override works')
+
+base=work/'base'; temp=work/'tmp'
+base.mkdir(exist_ok=True); temp.mkdir(exist_ok=True)
+(base/'settings.json').unlink(missing_ok=True)
+address='200:db8::1234'
+runblock("base,tmp=map(pathlib.Path",[base,temp,address,''])
+settings=json.loads((temp/'settings.json').read_text()); assert settings['port']==1488
+(base/'settings.json').write_text(json.dumps(settings))
+runblock("base,tmp=map(pathlib.Path",[base,temp,address,'2443'])
+s2=json.loads((temp/'settings.json').read_text()); assert s2['uuid']==settings['uuid'] and s2['port']==2443
+link=(temp/'client.txt').read_text(); assert f'@[{address}]:2443?' in link
+print('PASS: UUID preserved on rerun, port override and IPv6 link generated')
+
+exe=Path(os.environ['SING_BOX_BINARY']).resolve()
+creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
+def check(p): subprocess.run([str(exe),'check','-c',str(p)],check=True)
+check(temp/'server.json')
+print('PASS: generated production server config accepted by sing-box 1.14.3')
+
+def port(family=socket.AF_INET):
+    with socket.socket(family) as s:
+        s.bind(('::1' if family==socket.AF_INET6 else '127.0.0.1',0)); return s.getsockname()[1]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        payload=b'vless-domain-request-ok'
+        self.send_response(200); self.end_headers(); self.wfile.write(payload)
+    def log_message(self,*args): pass
+
+http=http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
+threading.Thread(target=http.serve_forever,daemon=True).start()
+server=json.loads((temp/'server.json').read_text())
+server['inbounds'][0]['listen']='::1'; server['inbounds'][0]['listen_port']=port(socket.AF_INET6)
+server_file=work/'local-server.json'; server_file.write_text(json.dumps(server))
+local_settings={**s2,'address':'::1','port':server['inbounds'][0]['listen_port']}
+settings_file=work/'local-settings.json'; settings_file.write_text(json.dumps(local_settings))
+client_file=work/'local-client.json'; client_port=port()
+runblock("s=json.load(open(sys.argv[1]))",[settings_file,client_file,client_port])
+check(server_file); check(client_file)
+processes=[]; handles=[]
+try:
+    for name,config in [('server',server_file),('client',client_file)]:
+        f=open(work/f'{name}.log','w'); handles.append(f)
+        processes.append(subprocess.Popen([str(exe),'run','-c',str(config)],stdout=f,stderr=f,creationflags=creationflags))
+    time.sleep(1)
+    assert all(p.poll() is None for p in processes), 'sing-box exited'
+    # A SOCKS5 domain request (ATYP=3), passed through VLESS to IPv6 server.
+    def request():
+        with socket.create_connection(('127.0.0.1',client_port),timeout=5) as s:
+            s.settimeout(5); s.sendall(b'\x05\x01\x00'); assert s.recv(2)==b'\x05\x00'
+            host=b'localhost'
+            s.sendall(b'\x05\x01\x00\x03'+bytes([len(host)])+host+http.server_port.to_bytes(2,'big'))
+            header=s.recv(4); assert header[1]==0,header
+            n={1:4,4:16}.get(header[3])
+            if n is None: n=s.recv(1)[0]
+            remaining=n+2
+            while remaining: remaining-=len(s.recv(remaining))
+            s.sendall(b'GET / HTTP/1.0\r\nHost: localhost\r\n\r\n')
+            data=b''
+            while chunk:=s.recv(65536): data+=chunk
+            return data
+    assert b'vless-domain-request-ok' in request()
+    print('PASS: real SOCKS5 domain request -> VLESS over IPv6 -> server IPv4 DNS -> local HTTP')
+    processes[1].terminate(); processes[1].wait(timeout=5)
+    bad=json.loads(client_file.read_text()); bad['outbounds'][0]['uuid']='00000000-0000-4000-8000-000000000001'
+    client_file.write_text(json.dumps(bad))
+    processes[1]=subprocess.Popen([str(exe),'run','-c',str(client_file)],stdout=handles[1],stderr=handles[1],creationflags=creationflags)
+    time.sleep(.5)
+    try:
+        data=request()
+    except (OSError,AssertionError,IndexError): data=b''
+    assert b'vless-domain-request-ok' not in data
+    print('PASS: incorrect UUID does not grant access')
+finally:
+    for p in processes:
+        if p.poll() is None: p.terminate()
+        with contextlib.suppress(subprocess.TimeoutExpired): p.wait(timeout=5)
+    for f in handles: f.close()
+    http.shutdown()
