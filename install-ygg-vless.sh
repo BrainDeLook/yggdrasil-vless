@@ -8,7 +8,7 @@ APP=/opt/ygg-vless
 SERVICE=ygg-vless
 YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
-INSTALLER_VERSION=1.3.0
+INSTALLER_VERSION=1.3.1
 ALLOW_IPS=()
 SSH_PORT=''
 MODE=install
@@ -97,6 +97,11 @@ configure_wizard() {
         old_name=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("name","Yggdrasil VLESS"))')
         old_port=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("port",1488))')
         old_reality=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("reality_server","www.microsoft.com"))')
+    fi
+    # A pasted launch command can leave extra newlines in the terminal queue.
+    # Drain type-ahead once, BEFORE showing any prompt; never between fields.
+    if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
+        while IFS= read -r -s -n 1 -t 0.05 answer; do :; done
     fi
     printf '%s' "$C_BOLD$C_CYAN" >&3
     printf '\n  ┌──────────────────────────────────────────┐\n  │       Yggdrasil + VLESS Reality           │\n  └──────────────────────────────────────────┘\n\n' >&3
