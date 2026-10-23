@@ -8,9 +8,12 @@ APP=/opt/ygg-vless
 SERVICE=ygg-vless
 YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
-INSTALLER_VERSION=1.4.0
+INSTALLER_VERSION=1.5.0
 ALLOW_IPS=()
 SSH_PORT=''
+SSH_CHOICE=''
+SSH_ENABLED=0
+SSH_ALLOW_IPS=()
 MODE=install
 PORT=''
 NODE_NAME=''
@@ -62,9 +65,15 @@ print(tint('\n  ГОТОВО — '+settings['name'],'1;32'))
 print('  Адрес: '+settings['address']+'   Порт: '+str(settings['port']))
 if (base/'access.json').exists():
     access=json.loads((base/'access.json').read_text())
-    panel('SSH · АДРЕС НОДЫ И КОМАНДА ВХОДА',
-          'IPv6: '+settings['address']+'\n\nssh -6 -p '+str(access['ssh_port'])+' '+access['ssh_user']+'@'+settings['address']+'\n\nРазрешённые адреса клиентов:\n'+'\n'.join(access['allowed_ips']),'32')
-    print('  Для SSH используйте существующий ключ или пароль пользователя сервера.')
+    vpn='\n'.join(access['allowed_ips'])
+    if access.get('ssh_enabled',True):
+        panel('SSH · АДРЕС НОДЫ И КОМАНДА ВХОДА',
+              'IPv6: '+settings['address']+'\n\nssh -6 -p '+str(access['ssh_port'])+' '+access['ssh_user']+'@'+settings['address']+
+              '\n\nРазрешено для SSH:\n'+'\n'.join(access.get('ssh_allowed_ips',access['allowed_ips'])),'32')
+        print('  Для SSH используйте существующий ключ или пароль пользователя сервера.')
+    else:
+        panel('АДРЕС НОДЫ · SSH через Yggdrasil отключён','IPv6: '+settings['address'],'36')
+    print('\n  Разрешено для VLESS:\n'+vpn)
 panel('ССЫЛКА · INCY / Xray / sing-box',link,'35')
 panel('КОНФИГУРАЦИЯ ТАХИОНА · JSON с привязкой интерфейса',tachyon,'34')
 print('\n  Скопируйте JSON целиком, от { до }, в подключение Тахиона.')
@@ -76,7 +85,7 @@ normalize_access() {
     python3 - "$@" <<'PY'
 import ipaddress,sys
 result=set()
-args=sys.argv[1:]; mode=args.pop(0)[2:] if args and args[0] in ('--router','--lan') else 'pair'
+args=sys.argv[1:]; mode=args.pop(0)[2:] if args and args[0] in ('--router','--lan','--any') else 'pair'
 try:
     for value in args:
         if '%' in value: raise ValueError('Не указывайте зону интерфейса в IPv6')
@@ -104,11 +113,11 @@ PY
 }
 configure_wizard() {
     local old_name='Yggdrasil VLESS' old_port=1488 old_reality='www.microsoft.com' answer normalized value kind selected router_ip='' lan_subnet=''
-    local -a extra_ips=()
+    local -a extra_ips=() field_values=()
     if [[ -s "$BASE/settings.json" ]] && command -v python3 >/dev/null; then
-        old_name=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("name","Yggdrasil VLESS"))')
-        old_port=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("port",1488))')
-        old_reality=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("reality_server","www.microsoft.com"))')
+        old_name=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("name","Yggdrasil VLESS"))' "$BASE/settings.json")
+        old_port=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("port",1488))' "$BASE/settings.json")
+        old_reality=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("reality_server","www.microsoft.com"))' "$BASE/settings.json")
     fi
     # A pasted launch command can leave extra newlines in the terminal queue.
     # Drain type-ahead once, BEFORE showing any prompt; never between fields.
@@ -145,52 +154,72 @@ configure_wizard() {
     if [[ ${#ALLOW_IPS[@]} == 0 && -s "$BASE/access.json" ]]; then
         mapfile -t ALLOW_IPS < <(python3 -c 'import json,sys;print("\n".join(json.load(open(sys.argv[1]))["allowed_ips"]))' "$BASE/access.json")
     fi
-    # Recover each required field independently; retain additional allowlist entries.
+    if [[ -s "$BASE/access.json" ]]; then
+        if [[ -z "$SSH_CHOICE" ]]; then
+            SSH_CHOICE=$(python3 -c 'import json,sys;s=json.load(open(sys.argv[1]));print(int(s.get("ssh_enabled",True)))' "$BASE/access.json")
+        fi
+        if [[ ${#SSH_ALLOW_IPS[@]} == 0 ]]; then
+            mapfile -t SSH_ALLOW_IPS < <(python3 -c 'import json,sys;s=json.load(open(sys.argv[1]));sys.stdout.write("\n".join(s.get("ssh_allowed_ips",s["allowed_ips"])))' "$BASE/access.json")
+        fi
+    fi
+    if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
+        printf '%s' "$C_YELLOW" >&3
+        while true; do
+            if [[ ${SSH_CHOICE:-0} == 1 ]]; then selected=да; else selected=нет; fi
+            printf '\n  Нужен SSH через Yggdrasil? да/нет [%s]: ' "$selected" >&3
+            IFS= read -r answer
+            case "${answer:-$selected}" in
+                да|Да|д|yes|y|Y) SSH_CHOICE=1; break ;;
+                нет|Нет|н|no|n|N) SSH_CHOICE=0; break ;;
+                *) printf '  Ответьте да или нет.\n' >&3 ;;
+            esac
+        done
+        printf '%s' "$C_RESET" >&3
+    fi
+    SSH_ENABLED=${SSH_CHOICE:-0}
+    # Each VLESS field accepts multiple values; additional exact LAN IPs survive updates.
     for value in "${ALLOW_IPS[@]}"; do
-        if [[ -z "$router_ip" && "$value" == 2* && "$value" != */* ]]; then
-            router_ip=$value
-        elif [[ -z "$lan_subnet" && "$value" == 3* && "$value" == */64 ]]; then
-            lan_subnet=$value
+        if [[ "$value" == 2* && "$value" != */* ]]; then
+            router_ip+="${router_ip:+ }$value"
+        elif [[ "$value" == 3* && "$value" == */64 ]]; then
+            lan_subnet+="${lan_subnet:+ }$value"
         else
             extra_ips+=("$value")
         fi
     done
     if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
         printf '%s' "$C_CYAN" >&3
-        printf '\n  ДОСТУП К НОДЕ · обязательны ОБА поля\n' >&3
-        printf '  Откройте Сеть → Интерфейсы → Yggdrasil на роутере.\n' >&3
-        printf '  IPv6 роутера 200:… разрешает Тахион; уберите /7.\n' >&3
-        printf '  IPv6-PD 300:…/64 разрешает устройства LAN; сохраните /64.\n' >&3
-        printf '  Адрес ПК может меняться внутри /64. SSH требует ключ/пароль.\n' >&3
-        printf '  Адрес VPS сюда не вводите. Примеры ниже замените своими значениями.\n' >&3
+        printf '\n  ДОСТУП К VLESS · можно добавить себя и друзей\n' >&3
+        printf '  Откройте Сеть → Интерфейсы → Yggdrasil на каждом роутере.\n' >&3
+        printf '  IPv6 200:… — сами роутеры и Тахион; уберите /7.\n' >&3
+        printf '  IPv6-PD 300:…/64 — устройства LAN; сохраните /64.\n' >&3
+        printf '  В каждом поле можно указать НЕСКОЛЬКО значений через пробел.\n' >&3
+        printf '  Адреса VPS сюда не вводите. Ссылка VLESS для друзей будет общей.\n' >&3
         printf '%s' "$C_YELLOW" >&3
         for kind in router lan; do
             if [[ "$kind" == router ]]; then
-                printf '\n  Пример адреса роутера: 200:1111:2222:3333:4444:5555:6666:7777\n' >&3
+                printf '\n  Пример: 200:1111:2222:3333:4444:5555:6666:7777 200:aaaa:bbbb:cccc:dddd:eeee:ffff:1111\n' >&3
                 selected=$router_ip
             else
-                printf '\n  Пример подсети LAN: 300:1111:2222:3333::/64\n' >&3
+                printf '\n  Пример: 300:1111:2222:3333::/64 300:aaaa:bbbb:cccc::/64\n' >&3
                 selected=$lan_subnet
             fi
             while true; do
                 if [[ "$kind" == router ]]; then
-                    printf '  IPv6 роутера (без /7) [%s]: ' "${selected:-обязательно}" >&3
+                    printf '  IPv6 роутеров (без /7) [%s]: ' "${selected:-обязательно}" >&3
                 else
-                    printf '  Подсеть LAN IPv6-PD (с /64) [%s]: ' "${selected:-обязательно}" >&3
+                    printf '  Подсети LAN IPv6-PD (с /64) [%s]: ' "${selected:-обязательно}" >&3
                 fi
                 IFS= read -r answer
                 value=${answer:-$selected}
                 if [[ -z "$value" ]]; then
-                    printf '  Это обязательное поле. Скопируйте значение с роутера.\n' >&3
-                    continue
+                    printf '  Это обязательное поле. Скопируйте значения с роутеров.\n' >&3; continue
                 fi
+                read -r -a field_values <<<"$value"
                 if command -v python3 >/dev/null; then
-                    if ! normalized=$(normalize_access "--$kind" "$value" 2>&1); then
+                    if ! normalized=$(normalize_access "--$kind" "${field_values[@]}" 2>&1); then
                         printf '  %s\n' "$normalized" >&3; continue
                     fi
-                    value=$normalized
-                elif [[ ( "$kind" == router && ( "$value" != 2* || "$value" == */* ) ) || ( "$kind" == lan && ( "$value" != 3* || "$value" != */64 ) ) ]]; then
-                    printf '  Неверный формат. Скопируйте значение как в примере.\n' >&3; continue
                 fi
                 if [[ "$kind" == router ]]; then router_ip=$value; else lan_subnet=$value; fi
                 break
@@ -200,8 +229,34 @@ configure_wizard() {
     fi
     [[ -n "$router_ip" ]] || die 'Обязателен адрес роутера: --allow-ip 200:… (без /7)'
     [[ -n "$lan_subnet" ]] || die 'Обязательна LAN-подсеть: --allow-ip 300:…/64'
-    ALLOW_IPS=("$router_ip" "$lan_subnet" "${extra_ips[@]}")
-    printf '\n  IPv6 роутера: %s\n  Подсеть LAN:  %s\n' "$router_ip" "$lan_subnet" >&3
+    read -r -a ALLOW_IPS <<<"$router_ip $lan_subnet"
+    ALLOW_IPS+=("${extra_ips[@]}")
+    printf '\n  VLESS · роутеры: %s\n  VLESS · LAN:     %s\n' "$router_ip" "$lan_subnet" >&3
+    if [[ $SSH_ENABLED == 1 ]]; then
+        if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
+            printf '%s' "$C_YELLOW" >&3
+            printf '\n  ДОСТУП К SSH · отдельный список\n' >&3
+            printf '  Укажите только тех, кому нужен SSH: IP 200:…, 300:… или LAN /64.\n' >&3
+            printf '  Несколько значений — через пробел. VLESS сам по себе SSH не разрешает.\n' >&3
+            printf '  Пример: 200:1111:2222:3333:4444:5555:6666:7777 300:1111:2222:3333::/64\n' >&3
+            while true; do
+                printf '  IP / подсети для SSH [%s]: ' "${SSH_ALLOW_IPS[*]:-обязательно}" >&3
+                IFS= read -r answer
+                if [[ -n "$answer" ]]; then read -r -a SSH_ALLOW_IPS <<<"$answer"; fi
+                if [[ ${#SSH_ALLOW_IPS[@]} == 0 ]]; then
+                    printf '  Укажите хотя бы один адрес или подсеть для SSH.\n' >&3; continue
+                fi
+                if command -v python3 >/dev/null && ! normalized=$(normalize_access --any "${SSH_ALLOW_IPS[@]}" 2>&1); then
+                    printf '  %s\n' "$normalized" >&3; continue
+                fi
+                break
+            done
+            printf '%s' "$C_RESET" >&3
+        fi
+        [[ ${#SSH_ALLOW_IPS[@]} -gt 0 ]] || die 'Для SSH укажите --ssh-allow-ip IPv6 или LAN/64'
+    else
+        printf '  SSH через Yggdrasil: отключён. Публичный SSH сохраняется.\n' >&3
+    fi
     if [[ -z "${SSH_PORT:-}" && -s "$BASE/access.json" ]]; then
         SSH_PORT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ssh_port",22))' "$BASE/access.json")
     fi
@@ -244,6 +299,7 @@ configure_access() {
     log 'Настраиваю SSH через Yggdrasil и список разрешённых IPv6…'
     local ssh_user=${SUDO_USER:-root} client service_port
     id "$ssh_user" >/dev/null || ssh_user=root
+    if [[ $SSH_ENABLED == 1 ]]; then
     install -d -m 755 /run/sshd
     ssh-keygen -A
     # Reuse a native listener when possible. Otherwise bind a separate sshd only
@@ -292,28 +348,41 @@ RestartSec=5
 WantedBy=multi-user.target
 UNIT
     fi
-    python3 - "$BASE" "$ADDRESS" "$SSH_PORT" "$ssh_user" "${ALLOW_IPS[@]}" <<'PY'
+    fi
+    python3 - "$BASE" "$ADDRESS" "$SSH_PORT" "$ssh_user" "$SSH_ENABLED" "$PORT" "${ALLOW_IPS[@]}" --ssh-list "${SSH_ALLOW_IPS[@]}" <<'PY'
 import ipaddress,json,pathlib,sys
 base=pathlib.Path(sys.argv[1]); address=str(ipaddress.IPv6Address(sys.argv[2]))
-allowed=sorted(set(sys.argv[5:])) # Already validated and normalized before changing services.
-(base/'access.json').write_text(json.dumps({'ssh_port':int(sys.argv[3]),'ssh_user':sys.argv[4],'allowed_ips':allowed},indent=2)+'\n')
-# Only this node destination is filtered; the public SSH path is untouched.
-rules='''table inet ygg_vless_access {
- set clients { type ipv6_addr; flags interval; auto-merge; elements = { ALLOWED } }
- chain input {
+split=sys.argv.index('--ssh-list')
+allowed=sorted(set(sys.argv[7:split])); ssh_configured=sorted(set(sys.argv[split+1:]))
+ssh_enabled=sys.argv[5]=='1'; ssh_allowed=ssh_configured if ssh_enabled else []; vpn_port=int(sys.argv[6]); ssh_port=int(sys.argv[3])
+access={'schema_version':2,'ssh_enabled':ssh_enabled,'ssh_port':ssh_port,'ssh_user':sys.argv[4],
+        'allowed_ips':allowed,'ssh_allowed_ips':ssh_configured}
+(base/'access.json').write_text(json.dumps(access,indent=2)+'\n')
+# SSH has its own gate, before established-state acceptance, so disabling it
+# also blocks an existing wildcard/native SSH listener at the node address.
+rules=f'''table inet ygg_vless_access {{
+ set clients {{ type ipv6_addr; flags interval; auto-merge; elements = {{ {', '.join(allowed)} }} }}
+ set ssh_clients {{ type ipv6_addr; flags interval; auto-merge; {('elements = { '+', '.join(ssh_allowed)+' };') if ssh_allowed else ''} }}
+ chain input {{
   type filter hook input priority -10; policy accept;
-  ip6 daddr ADDRESS jump node
- }
- chain node {
-  iifname "lo" accept
-  ct state established,related accept
-  icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
-  ip6 saddr @clients accept
+  ip6 daddr {address} jump node
+ }}
+ chain ssh_gate {{
+  ip6 saddr @ssh_clients accept
   counter drop
- }
-}
+ }}
+ chain node {{
+  iifname "lo" accept
+  tcp dport {{ {', '.join(map(str,sorted({22,ssh_port})))} }} jump ssh_gate
+  ct state established,related accept
+  icmpv6 type {{ destination-unreachable, packet-too-big, time-exceeded, parameter-problem }} accept
+  ip6 saddr @clients tcp dport {vpn_port} accept
+  ip6 saddr @clients icmpv6 type echo-request accept
+  counter drop
+ }}
+}}
 '''
-(base/'access.nft').write_text(rules.replace('ADDRESS',address).replace('ALLOWED',', '.join(allowed)))
+(base/'access.nft').write_text(rules)
 PY
     cat >"$APP/apply-access.sh" <<'SH'
 #!/usr/bin/env bash
@@ -343,8 +412,11 @@ ExecStop=-/usr/sbin/nft delete table inet ygg_vless_access
 [Install]
 WantedBy=multi-user.target
 UNIT
-    for client in "${ALLOW_IPS[@]}"; do
-        for service_port in "$PORT" "$SSH_PORT"; do
+    for service_port in "$PORT" "$SSH_PORT"; do
+        local -a service_clients=()
+        if [[ "$service_port" == "$PORT" ]]; then service_clients=("${ALLOW_IPS[@]}");
+        elif [[ $SSH_ENABLED == 1 ]]; then service_clients=("${SSH_ALLOW_IPS[@]}"); fi
+        for client in "${service_clients[@]}"; do
             if [[ "$FW" == ufw ]]; then
                 ufw allow in from "$client" to "$ADDRESS" port "$service_port" proto tcp comment 'ygg-vless'
             elif [[ "$FW" == firewalld ]]; then
@@ -360,14 +432,20 @@ UNIT
     systemctl daemon-reload
     systemctl enable ygg-vless-access
     systemctl reload-or-restart ygg-vless-access
-    if [[ -f /etc/systemd/system/ygg-vless-ssh.service ]]; then
+    if [[ $SSH_ENABLED == 1 && -f /etc/systemd/system/ygg-vless-ssh.service ]]; then
         systemctl enable ygg-vless-ssh
         systemctl restart ygg-vless-ssh
+    elif [[ $SSH_ENABLED == 0 && -f /etc/systemd/system/ygg-vless-ssh.service ]]; then
+        systemctl disable --now ygg-vless-ssh
     fi
+    if [[ $SSH_ENABLED == 1 ]]; then
     local ready=0
     for _ in {1..10}; do if ssh_probe; then ready=1; break; fi; sleep 1; done
     [[ $ready == 1 ]] || die 'SSH на Yggdrasil-адресе не отвечает. Смотрите journalctl -u ygg-vless-ssh'
-    log '✓ SSH отвечает на Yggdrasil-адресе. Доступ ограничен указанными IP.'
+    log '✓ SSH отвечает на Yggdrasil-адресе. Доступ ограничен отдельным списком IP.'
+    else
+        log '✓ SSH через Yggdrasil отключён; VLESS настроен отдельно.'
+    fi
 }
 cleanup() {
     if [[ -n "$TEST_PID" ]]; then kill "$TEST_PID" 2>/dev/null || true; wait "$TEST_PID" 2>/dev/null || true; fi
@@ -387,6 +465,9 @@ while (($#)); do
         --yes|-y) ASSUME_YES=1; shift ;;
         --port) [[ $# -ge 2 ]] || die 'Не указан порт после --port'; PORT=$2; shift 2 ;;
         --allow-ip) [[ $# -ge 2 ]] || die "Не указан IP после --allow-ip"; ALLOW_IPS+=("$2"); shift 2 ;;
+        --ssh) SSH_CHOICE=1; shift ;;
+        --no-ssh) SSH_CHOICE=0; shift ;;
+        --ssh-allow-ip) [[ $# -ge 2 ]] || die "Не указан IP для SSH"; SSH_ALLOW_IPS+=("$2"); shift 2 ;;
         --ssh-port) [[ $# -ge 2 ]] || die "Не указан SSH-порт"; SSH_PORT=$2; shift 2 ;;
         --peer) [[ $# -ge 2 ]] || die 'Не указан адрес пира после --peer'; PEERS+=("$2"); shift 2 ;;
         --firewall-ready) FIREWALL_READY=1; shift ;;
@@ -397,6 +478,8 @@ sudo bash install-ygg-vless.sh
 sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488 --allow-ip 200:1111:2222:3333:4444:5555:6666:7777 --allow-ip 300:1111:2222:3333::/64
 sudo ygg-vless --result | --show-link | --status | --test | --tachyon
 --allow-ip IPv6       обязательны адрес роутера 200:… и LAN 300:…/64; повторите флаг
+--ssh / --no-ssh      включить / отключить SSH через Yggdrasil
+--ssh-allow-ip IPv6   отдельный IP или LAN-подсеть для SSH; можно повторять
 --ssh-port PORT       порт SSH через Yggdrasil, по умолчанию 22
 --peer URI             заменить список пиров (можно несколько)
 --reality-server HOST  домен TLS 1.3 для рукопожатия Reality
@@ -515,10 +598,15 @@ fi
 log '[1/6] Установка необходимых пакетов. Подробности записываются в журнал…'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd openssl openssh-server nftables
+apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd openssl nftables
+if [[ $SSH_ENABLED == 1 ]]; then apt-get install -y openssh-server; fi
 [[ "$SSH_PORT" =~ ^[0-9]{1,5}$ && $((10#$SSH_PORT)) -ge 1 && $((10#$SSH_PORT)) -le 65535 ]] || die 'SSH-порт должен быть числом от 1 до 65535'
 normalized=$(normalize_access "${ALLOW_IPS[@]}") || die 'Исправьте IP или подсеть в списке доступа'
 mapfile -t ALLOW_IPS <<<"$normalized"
+if [[ $SSH_ENABLED == 1 ]]; then
+    normalized=$(normalize_access --any "${SSH_ALLOW_IPS[@]}") || die 'Исправьте список доступа к SSH'
+    mapfile -t SSH_ALLOW_IPS <<<"$normalized"
+fi
 [[ "$SSH_PORT" != "$PORT" ]] || die 'Порты SSH и прокси должны различаться'
 modprobe tun 2>/dev/null || true
 [[ -c /dev/net/tun ]] || die 'Недоступен /dev/net/tun. Включите TUN в панели VPS или контейнера.'

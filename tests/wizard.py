@@ -12,7 +12,7 @@ wizard=source[source.index('normalize_access() {'):source.index('detect_ygg_conf
 styles=source[source.index("C_RESET=''"):source.index('log() {')]
 with tempfile.TemporaryDirectory(prefix='ygg-wizard-') as d:
     script=Path(d)/'wizard.sh'
-    script.write_text('set -eu\nexec 3>&1\n'+styles+'\nBASE='+d+'\nNODE_NAME=""\nPORT=""\nREALITY_SERVER=""\nALLOW_IPS=()\nASSUME_YES=0\nINSTALLER_VERSION=test\ndie(){ echo "$*"; exit 1; }\n'+wizard+'\nconfigure_wizard\nprintf "RESULT:%s:%s\\n" "$NODE_NAME" "$PORT"\n')
+    script.write_text('set -eu\nexec 3>&1\n'+styles+'\nBASE='+d+'\nNODE_NAME=""\nPORT=""\nREALITY_SERVER=""\nSSH_CHOICE=""\nSSH_ENABLED=0\nSSH_ALLOW_IPS=()\nALLOW_IPS=()\nASSUME_YES=0\nINSTALLER_VERSION=test\ndie(){ echo "$*"; exit 1; }\n'+wizard+'\nconfigure_wizard\nprintf "RESULT:%s:%s\\n" "$NODE_NAME" "$PORT"\n')
     primary,secondary=pty.openpty()
     # Simulate blank lines left by pasting the shell launch command.
     os.write(primary,b'\n\n\n')
@@ -23,11 +23,13 @@ with tempfile.TemporaryDirectory(prefix='ygg-wizard-') as d:
         responses=[('Название подключения','Моя нода NL\n'),
                    ('Порт прокси','неверный-порт\n'),
                    ('Введите целое число','2443\n'),
-                   ('IPv6 роутера (без /7)','\n'),
+                   ('Нужен SSH через Yggdrasil?','да\n'),
+                   ('IPv6 роутеров (без /7)','\n'),
                    ('Это обязательное поле','300:1111:2222:3333::/64\n'),
-                   ('Ошибка списка доступа','200:1111:2222:3333:4444:5555:6666:7777\n'),
-                   ('Подсеть LAN IPv6-PD (с /64)','\n'),
-                   ('Подсеть LAN IPv6-PD (с /64)','300:1111:2222:3333::/64\n')]
+                   ('Ошибка списка доступа','200:1111:2222:3333:4444:5555:6666:7777 200:aaaa::1\n'),
+                   ('Подсети LAN IPv6-PD (с /64)','\n'),
+                   ('Подсети LAN IPv6-PD (с /64)','300:1111:2222:3333::/64 300:aaaa:bbbb:cccc::/64\n'),
+                   ('IP / подсети для SSH','200:1111:2222:3333:4444:5555:6666:7777\n')]
         next_response=0
         response_offset=0
         deadline=time.monotonic()+15
@@ -51,6 +53,7 @@ with tempfile.TemporaryDirectory(prefix='ygg-wizard-') as d:
         assert 'Название подключения' in output and 'Введите целое число' in output,output
         assert 'Ошибка списка доступа' in output and 'IPv6-PD' in output,output
         assert 'RESULT:Моя нода NL:2443' in output,output
+        assert output.index('Нужен SSH через Yggdrasil?')<output.index('IPv6 роутеров (без /7)'),output
         assert next_response==len(responses),output
         print('PASS: router and LAN fields are mandatory and reject swapped values; queued blank lines do not skip name; interactive wizard accepts Cyrillic name, rejects invalid port and accepts corrected port, validates LAN prefix and emits terminal colors')
     finally:

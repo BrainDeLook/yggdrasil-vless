@@ -36,7 +36,7 @@ yggdrasil -useconffile "$SCRATCH/peer.json" >"$SCRATCH/peer.log" 2>&1 &
 PEER_PID=$!
 sleep 1
 kill -0 "$PEER_PID"
-bash "$ROOT/install-ygg-vless.sh" --yes --ssh-port 2222 --allow-ip 200:db8::111 --allow-ip 300:db8:1:1::/64 --allow-ip 300:db8:1:1::111 --name 'Тестовая нода NL' --peer "tcp://127.0.0.1:$PORT" --firewall-ready
+bash "$ROOT/install-ygg-vless.sh" --yes --ssh --ssh-port 2222 --ssh-allow-ip 200:db8::111 --ssh-allow-ip 300:db8:1:1::/64 --ssh-allow-ip 200:db8::444 --allow-ip 200:db8::333 --allow-ip 200:db8::111 --allow-ip 300:db8:1:1::/64 --allow-ip 300:db8:1:1::111 --name 'Тестовая нода NL' --peer "tcp://127.0.0.1:$PORT" --firewall-ready
 AFTER=$(yggdrasil -useconffile "$ACTIVE" -address)
 test "$BEFORE" = "$AFTER"
 test "$ORPHAN_SHA" = "$(sha256sum /etc/yggdrasil.conf)"
@@ -65,14 +65,16 @@ ip netns exec ygg-test ip link set lo up
 ip netns exec ygg-test ip link set ygg-client up
 ip netns exec ygg-test ip -6 addr add fd42:1234::2/64 dev ygg-client nodad
 ip netns exec ygg-test ip -6 addr add 200:db8::111/128 dev ygg-client nodad
-ip netns exec ygg-test ip -6 addr add 200:db8::222/128 dev ygg-client nodad
+for source in 200:db8::222 200:db8::333 200:db8::444; do
+    ip netns exec ygg-test ip -6 addr add "$source/128" dev ygg-client nodad
+done
 for source in 300:db8:1:1::111 300:db8:1:1::222 300:db8:1:2::111; do
     ip netns exec ygg-test ip -6 addr add "$source/128" dev ygg-client nodad
 done
 ip netns exec ygg-test ip -6 route add "$BEFORE/128" via fd42:1234::1 dev ygg-client
 ip netns exec ygg-test python3 - "$BEFORE" <<'PY'
 import socket,sys
-for source,allowed in [('200:db8::111',True),('200:db8::222',False),('300:db8:1:1::111',True),('300:db8:1:1::222',True),('300:db8:1:2::111',False)]:
+for source,ssh_allowed,vpn_allowed in [('200:db8::111',True,True),('200:db8::222',False,False),('200:db8::333',False,True),('200:db8::444',True,False),('300:db8:1:1::111',True,True),('300:db8:1:1::222',True,True),('300:db8:1:2::111',False,False)]:
     for port in [2222,1488]:
         with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
             s.settimeout(3); s.bind((source,0))
@@ -80,8 +82,8 @@ for source,allowed in [('200:db8::111',True),('200:db8::222',False),('300:db8:1:
                 s.connect((sys.argv[1],port)); connected=True
                 if port==2222: assert s.recv(256).startswith(b'SSH-')
             except (TimeoutError,ConnectionRefusedError): connected=False
-            assert connected==allowed,(source,port,connected)
-print('PASS: SSH and proxy allow node IP and two changing LAN IPs; reject other node and LAN prefix')
+            assert connected==(ssh_allowed if port==2222 else vpn_allowed),(source,port,connected)
+print('PASS: multiple VPN/SSH clients, VPN-only friend, SSH-only client and denied LAN are independently enforced')
 PY
 # Authenticate over IPv6 and execute a command, using a throwaway CI-only key.
 ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/ssh-key"
@@ -92,9 +94,29 @@ ip netns exec ygg-test ssh -6 -b 200:db8::111 -p 2222 -i "$SCRATCH/ssh-key" \
     -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$SCRATCH/known_hosts" \
     -o ConnectTimeout=5 "root@$BEFORE" 'printf SSH_YGG_OK' | grep -q SSH_YGG_OK
 echo 'PASS: SSH public-key login and remote command over allowed Yggdrasil IPv6'
+systemctl is-active --quiet ygg-vless-access ygg-vless-ssh
+# Disable SSH on a full update, retaining the VLESS allowlist and node identity.
+bash "$ROOT/install-ygg-vless.sh" --yes --no-ssh --firewall-ready
+! systemctl is-active --quiet ygg-vless-ssh
+! systemctl is-enabled --quiet ygg-vless-ssh
+test "$(jq -r .ssh_enabled /etc/ygg-vless/access.json)" = false
+# Even an existing/native listener must be blocked remotely when SSH is off.
+# Start the disabled test listener explicitly to exercise the firewall gate.
+systemctl start ygg-vless-ssh
+ip netns exec ygg-test python3 - "$BEFORE" <<'PY'
+import socket,sys
+for port,expected in [(2222,False),(1488,True)]:
+    with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
+        s.settimeout(3); s.bind(('200:db8::111',0))
+        try: s.connect((sys.argv[1],port)); connected=True
+        except (TimeoutError,ConnectionRefusedError): connected=False
+        assert connected==expected,(port,connected)
+print('PASS: disabling SSH blocks an existing listener while VLESS stays reachable')
+PY
+systemctl stop ygg-vless-ssh
 ip link del ygg-host
 ip netns del ygg-test
-systemctl is-active --quiet ygg-vless-access ygg-vless-ssh
-# Rules and allowlist survive a full rerun; local self-test still works.
+systemctl is-active --quiet ygg-vless-access ygg-vless
+test "$UUID_BEFORE" = "$(jq -r .uuid /etc/ygg-vless/settings.json)"
 test "$(jq -r '.allowed_ips[0]' /etc/ygg-vless/access.json)" = 200:db8::111
-echo 'PASS: package + systemd + TUN + peer + VLESS Reality HTTPS + rename; identity, UUID and Reality keys retained'
+echo 'PASS: package/systemd/TUN + repeated install + optional SSH + independent permissions; node identity retained'
