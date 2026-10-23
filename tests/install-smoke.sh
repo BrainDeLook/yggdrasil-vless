@@ -79,8 +79,17 @@ for source,allowed in [('200:db8::111',True),('200:db8::222',False)]:
             assert connected==allowed,(source,port,connected)
 print('PASS: SSH banner and proxy reachable from allowed IPv6; both blocked for another IPv6')
 PY
-ip netns del ygg-test
+# Authenticate over IPv6 and execute a command, using a throwaway CI-only key.
+ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/ssh-key"
+install -d -m 700 /root/.ssh
+cat "$SCRATCH/ssh-key.pub" >>/root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+ip netns exec ygg-test ssh -6 -b 200:db8::111 -p 2222 -i "$SCRATCH/ssh-key" \
+    -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile="$SCRATCH/known_hosts" \
+    -o ConnectTimeout=5 "root@$BEFORE" 'printf SSH_YGG_OK' | grep -q SSH_YGG_OK
+echo 'PASS: SSH public-key login and remote command over allowed Yggdrasil IPv6'
 ip link del ygg-host
+ip netns del ygg-test
 systemctl is-active --quiet ygg-vless-access ygg-vless-ssh
 # Rules and allowlist survive a full rerun; local self-test still works.
 test "$(jq -r '.allowed_ips[0]' /etc/ygg-vless/access.json)" = 200:db8::111

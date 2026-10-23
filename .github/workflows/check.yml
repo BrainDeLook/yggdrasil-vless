@@ -47,5 +47,5 @@ jobs:
       - name: Show service logs on failure
         if: failure()
         run: |
-          sudo journalctl -u yggdrasil -u ygg-vless -n 100 --no-pager
+          sudo journalctl -u yggdrasil -u ygg-vless -u ygg-vless-ssh -u ygg-vless-access -n 100 --no-pager
           sudo sh -c 'tail -n 100 /var/log/ygg-vless/install-*.log' || true
