@@ -11,7 +11,7 @@ source=(Path(__file__).resolve().parents[1]/'install-ygg-vless.sh').read_text()
 wizard=source[source.index('configure_wizard() {'):source.index('detect_ygg_config() {')]
 with tempfile.TemporaryDirectory(prefix='ygg-wizard-') as d:
     script=Path(d)/'wizard.sh'
-    script.write_text('set -eu\nexec 3>&1\nBASE='+d+'\nNAME=""\nPORT=""\nREALITY_SERVER=""\nASSUME_YES=0\nINSTALLER_VERSION=test\ndie(){ echo "$*"; exit 1; }\n'+wizard+'\nconfigure_wizard\nprintf "RESULT:%s:%s\\n" "$NODE_NAME" "$PORT"\n')
+    script.write_text('set -eu\nexec 3>&1\nBASE='+d+'\nNODE_NAME=""\nPORT=""\nREALITY_SERVER=""\nASSUME_YES=0\nINSTALLER_VERSION=test\ndie(){ echo "$*"; exit 1; }\n'+wizard+'\nconfigure_wizard\nprintf "RESULT:%s:%s\\n" "$NODE_NAME" "$PORT"\n')
     primary,secondary=pty.openpty()
     p=subprocess.Popen(['bash',str(script)],stdin=secondary,stdout=secondary,stderr=secondary)
     os.close(secondary)
