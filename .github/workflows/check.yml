@@ -19,6 +19,7 @@ jobs:
           bash install.sh --help
           bash install-ygg-vless.sh --help
           sha256sum -c SHA256SUMS
+          python3 tests/wizard.py
       - name: Download verified sing-box used by the installer
         run: |
           mkdir -p .test-bin
@@ -27,9 +28,15 @@ jobs:
             -o .test-bin/sing-box.tar.gz
           echo 'e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee  .test-bin/sing-box.tar.gz' | sha256sum -c -
           tar -xzf .test-bin/sing-box.tar.gz -C .test-bin
+      - name: Download verified official Xray (same core family used by INCY)
+        run: |
+          curl -fL --retry 3 https://github.com/XTLS/Xray-core/releases/download/v26.10.21/Xray-linux-64.zip -o .test-bin/xray.zip
+          echo '0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978  .test-bin/xray.zip' | sha256sum -c -
+          unzip -q .test-bin/xray.zip -d .test-bin/xray
       - name: Verify config, identity preservation, IPv6 VLESS and UUID authentication
         env:
           SING_BOX_BINARY: .test-bin/sing-box-1.14.3-linux-amd64/sing-box
+          XRAY_BINARY: .test-bin/xray/xray
         run: python3 tests/verify.py
   install-smoke:
     runs-on: ubuntu-24.04
@@ -39,4 +46,6 @@ jobs:
         run: sudo bash tests/install-smoke.sh
       - name: Show service logs on failure
         if: failure()
-        run: sudo journalctl -u yggdrasil -u ygg-vless -n 100 --no-pager
+        run: |
+          sudo journalctl -u yggdrasil -u ygg-vless -n 100 --no-pager
+          sudo sh -c 'tail -n 100 /var/log/ygg-vless/install-*.log' || true

@@ -11,6 +11,7 @@ import threading
 import time
 import tempfile
 import urllib.request
+from urllib.parse import urlsplit,parse_qs,unquote
 
 root=Path(__file__).resolve().parents[1]
 script=(root/'install-ygg-vless.sh').read_text(encoding='utf-8')
@@ -59,13 +60,21 @@ base=work/'base'; temp=work/'tmp'
 base.mkdir(exist_ok=True); temp.mkdir(exist_ok=True)
 (base/'settings.json').unlink(missing_ok=True)
 address='200:db8::1234'
-runblock("base,tmp=map(pathlib.Path",[base,temp,address,''])
+runblock("base,tmp=map(pathlib.Path",[base,temp,address,'','NL / Моя нода #1'])
 settings=json.loads((temp/'settings.json').read_text()); assert settings['port']==1488
 (base/'settings.json').write_text(json.dumps(settings))
 runblock("base,tmp=map(pathlib.Path",[base,temp,address,'2443'])
 s2=json.loads((temp/'settings.json').read_text()); assert s2['uuid']==settings['uuid'] and s2['port']==2443
+assert s2['reality_private_key']==settings['reality_private_key']
+assert s2['reality_short_id']==settings['reality_short_id']
 link=(temp/'client.txt').read_text(); assert f'@[{address}]:2443?' in link
-print('PASS: UUID preserved on rerun, port override and IPv6 link generated')
+parsed=urlsplit(link.strip()); query=parse_qs(parsed.query)
+assert unquote(parsed.fragment)=='NL / Моя нода #1'
+assert query['security']==['reality'] and query['pbk']==[s2['reality_public_key']]
+assert query['flow']==['xtls-rprx-vision'] and 'private_key' not in link
+tachyon=json.loads((temp/'client-tachyon.json').read_text())
+assert tachyon['bind_interface']=='yggdrasil' and tachyon['tls']['reality']['enabled']
+print('PASS: UUID/Reality keys retained, UTF-8 name encoded in link, Tachyon interface override exported')
 
 exe=Path(os.environ['SING_BOX_BINARY']).resolve()
 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform=='win32' else 0
@@ -103,7 +112,7 @@ try:
     # A SOCKS5 domain request (ATYP=3), passed through VLESS to IPv6 server.
     def request():
         with socket.create_connection(('127.0.0.1',client_port),timeout=5) as s:
-            s.settimeout(5); s.sendall(b'\x05\x01\x00'); assert s.recv(2)==b'\x05\x00'
+            s.settimeout(20); s.sendall(b'\x05\x01\x00'); assert s.recv(2)==b'\x05\x00'
             host=b'localhost'
             s.sendall(b'\x05\x01\x00\x03'+bytes([len(host)])+host+http.server_port.to_bytes(2,'big'))
             header=s.recv(4); assert header[1]==0,header
@@ -116,7 +125,26 @@ try:
             while chunk:=s.recv(65536): data+=chunk
             return data
     assert b'vless-domain-request-ok' in request()
-    print('PASS: real SOCKS5 domain request -> VLESS over IPv6 -> server IPv4 DNS -> local HTTP')
+    print('PASS: sing-box domain request -> VLESS Vision + Reality over IPv6 -> IPv4 HTTP')
+    if os.environ.get('XRAY_BINARY'):
+        # Build Xray settings from the share URL, as a client importer does.
+        xray=Path(os.environ['XRAY_BINARY']).resolve()
+        xr={'log':{'loglevel':'warning'},
+            'inbounds':[{'listen':'127.0.0.1','port':port(),'protocol':'socks','settings':{'auth':'noauth'}}],
+            'outbounds':[{'protocol':'vless','settings':{'vnext':[{'address':'::1',
+              'port':local_settings['port'],'users':[{'id':parsed.username,'encryption':query['encryption'][0],
+              'flow':query['flow'][0]}]}]},'streamSettings':{'network':'tcp','security':query['security'][0],
+              'realitySettings':{'serverName':query['sni'][0],'fingerprint':query['fp'][0],
+                'publicKey':query['pbk'][0],'shortId':query['sid'][0]}}}]}
+        xr_file=work/'xray-client.json'; xr_file.write_text(json.dumps(xr))
+        subprocess.run([str(xray),'run','-test','-config',str(xr_file)],check=True,capture_output=True)
+        xf=open(work/'xray.log','w'); handles.append(xf)
+        xp=subprocess.Popen([str(xray),'run','-config',str(xr_file)],stdout=xf,stderr=xf,creationflags=creationflags)
+        processes.append(xp); time.sleep(.7)
+        saved_port=client_port; client_port=xr['inbounds'][0]['port']
+        try: assert b'vless-domain-request-ok' in request()
+        finally: client_port=saved_port
+        print('PASS: official Xray imports generated Reality link and transfers IPv6 VLESS traffic')
     processes[1].terminate(); processes[1].wait(timeout=5)
     bad=json.loads(client_file.read_text()); bad['outbounds'][0]['uuid']='00000000-0000-4000-8000-000000000001'
     client_file.write_text(json.dumps(bad))
