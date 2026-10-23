@@ -8,7 +8,7 @@ APP=/opt/ygg-vless
 SERVICE=ygg-vless
 YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
-INSTALLER_VERSION=1.3.1
+INSTALLER_VERSION=1.4.0
 ALLOW_IPS=()
 SSH_PORT=''
 MODE=install
@@ -76,23 +76,35 @@ normalize_access() {
     python3 - "$@" <<'PY'
 import ipaddress,sys
 result=set()
+args=sys.argv[1:]; mode=args.pop(0)[2:] if args and args[0] in ('--router','--lan') else 'pair'
 try:
-    for value in sys.argv[1:]:
+    for value in args:
         if '%' in value: raise ValueError('Не указывайте зону интерфейса в IPv6')
         net=ipaddress.IPv6Network(value,strict=True)
         if not net.subnet_of(ipaddress.IPv6Network('200::/7')):
             raise ValueError('Нужен адрес Yggdrasil из 200::/7')
         if net.prefixlen<128 and (net.prefixlen<64 or not net.subnet_of(ipaddress.IPv6Network('300::/8'))):
             raise ValueError('Для LAN разрешены подсети 300:…/64 или более узкие; адрес 200:… укажите без /7')
+        if mode=='router' and not (net.prefixlen==128 and net.subnet_of(ipaddress.IPv6Network('200::/8'))):
+            raise ValueError('IPv6 роутера: нужен адрес 200:… без /7, а не LAN-подсеть')
+        if mode=='lan' and not (net.prefixlen==64 and net.subnet_of(ipaddress.IPv6Network('300::/8'))):
+            raise ValueError('IPv6-PD LAN: нужна подсеть 300:…/64 вместе с /64')
         result.add(str(net.network_address) if net.prefixlen==128 else str(net))
-    if not result: raise ValueError('Укажите хотя бы один IP или LAN-подсеть')
+    if not result: raise ValueError('Поле обязательно: укажите значение из интерфейса Yggdrasil на роутере')
+    nets=[ipaddress.IPv6Network(v) for v in result]
+    if mode=='pair':
+        if not any(n.prefixlen==128 and n.subnet_of(ipaddress.IPv6Network('200::/8')) for n in nets):
+            raise ValueError('Не указан IPv6 самого роутера 200:…; одной подсети LAN недостаточно')
+        if not any(n.prefixlen==64 and n.subnet_of(ipaddress.IPv6Network('300::/8')) for n in nets):
+            raise ValueError('Не указана подсеть LAN 300:…/64; одного адреса роутера недостаточно')
 except ValueError as e:
     sys.exit('Ошибка списка доступа: '+str(e))
 print('\n'.join(sorted(result)))
 PY
 }
 configure_wizard() {
-    local old_name='Yggdrasil VLESS' old_port=1488 old_reality='www.microsoft.com' answer normalized
+    local old_name='Yggdrasil VLESS' old_port=1488 old_reality='www.microsoft.com' answer normalized value kind selected router_ip='' lan_subnet=''
+    local -a extra_ips=()
     if [[ -s "$BASE/settings.json" ]] && command -v python3 >/dev/null; then
         old_name=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("name","Yggdrasil VLESS"))')
         old_port=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("port",1488))')
@@ -133,36 +145,63 @@ configure_wizard() {
     if [[ ${#ALLOW_IPS[@]} == 0 && -s "$BASE/access.json" ]]; then
         mapfile -t ALLOW_IPS < <(python3 -c 'import json,sys;print("\n".join(json.load(open(sys.argv[1]))["allowed_ips"]))' "$BASE/access.json")
     fi
+    # Recover each required field independently; retain additional allowlist entries.
+    for value in "${ALLOW_IPS[@]}"; do
+        if [[ -z "$router_ip" && "$value" == 2* && "$value" != */* ]]; then
+            router_ip=$value
+        elif [[ -z "$lan_subnet" && "$value" == 3* && "$value" == */64 ]]; then
+            lan_subnet=$value
+        else
+            extra_ips+=("$value")
+        fi
+    done
     if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
         printf '%s' "$C_CYAN" >&3
-        printf '\n  ДОСТУП К НОДЕ · SSH и прокси\n' >&3
-        printf '  1. На роутере откройте интерфейс Yggdrasil.\n' >&3
-        printf '  2. Возьмите IPv6: 200:… БЕЗ /7 — доступ с самого роутера.\n' >&3
-        printf '     Пример: 200:1111:2222:3333:4444:5555:6666:7777\n' >&3
-        printf '  3. Возьмите IPv6-PD: 300:…/64 ВМЕСТЕ с /64 — доступ со всей LAN.\n' >&3
-        printf '     Пример: 300:1111:2222:3333::/64\n' >&3
-        printf '  Адрес ПК может меняться внутри подсети — разрешение /64 сохранится.\n' >&3
-        printf '  Для роутера и его LAN укажите ОБА значения через пробел.\n' >&3
+        printf '\n  ДОСТУП К НОДЕ · обязательны ОБА поля\n' >&3
+        printf '  Откройте Сеть → Интерфейсы → Yggdrasil на роутере.\n' >&3
+        printf '  IPv6 роутера 200:… разрешает Тахион; уберите /7.\n' >&3
+        printf '  IPv6-PD 300:…/64 разрешает устройства LAN; сохраните /64.\n' >&3
+        printf '  Адрес ПК может меняться внутри /64. SSH требует ключ/пароль.\n' >&3
+        printf '  Адрес VPS сюда не вводите. Примеры ниже замените своими значениями.\n' >&3
         printf '%s' "$C_YELLOW" >&3
-        printf '  /64 разрешает все устройства этой LAN. SSH всё равно требует ключ/пароль.\n' >&3
-        printf '  Адрес VPS в список не вводите. Отдельные IP 300:… тоже поддерживаются.\n' >&3
-        while true; do
-            printf '  Разрешённые IP / подсети [%s]: ' "${ALLOW_IPS[*]:-не заданы}" >&3
-            IFS= read -r answer
-            if [[ -n "$answer" ]]; then read -r -a ALLOW_IPS <<<"$answer"; fi
-            if [[ ${#ALLOW_IPS[@]} == 0 ]]; then
-                printf '  Введите адрес роутера и/или подсеть LAN.\n' >&3
-                continue
+        for kind in router lan; do
+            if [[ "$kind" == router ]]; then
+                printf '\n  Пример адреса роутера: 200:1111:2222:3333:4444:5555:6666:7777\n' >&3
+                selected=$router_ip
+            else
+                printf '\n  Пример подсети LAN: 300:1111:2222:3333::/64\n' >&3
+                selected=$lan_subnet
             fi
-            if ! command -v python3 >/dev/null; then break; fi
-            if normalized=$(normalize_access "${ALLOW_IPS[@]}" 2>&1); then
-                mapfile -t ALLOW_IPS <<<"$normalized"; break
-            fi
-            printf '  %s\n' "$normalized" >&3
+            while true; do
+                if [[ "$kind" == router ]]; then
+                    printf '  IPv6 роутера (без /7) [%s]: ' "${selected:-обязательно}" >&3
+                else
+                    printf '  Подсеть LAN IPv6-PD (с /64) [%s]: ' "${selected:-обязательно}" >&3
+                fi
+                IFS= read -r answer
+                value=${answer:-$selected}
+                if [[ -z "$value" ]]; then
+                    printf '  Это обязательное поле. Скопируйте значение с роутера.\n' >&3
+                    continue
+                fi
+                if command -v python3 >/dev/null; then
+                    if ! normalized=$(normalize_access "--$kind" "$value" 2>&1); then
+                        printf '  %s\n' "$normalized" >&3; continue
+                    fi
+                    value=$normalized
+                elif [[ ( "$kind" == router && ( "$value" != 2* || "$value" == */* ) ) || ( "$kind" == lan && ( "$value" != 3* || "$value" != */64 ) ) ]]; then
+                    printf '  Неверный формат. Скопируйте значение как в примере.\n' >&3; continue
+                fi
+                if [[ "$kind" == router ]]; then router_ip=$value; else lan_subnet=$value; fi
+                break
+            done
         done
         printf '%s' "$C_RESET" >&3
     fi
-    [[ ${#ALLOW_IPS[@]} -gt 0 ]] || die 'Укажите --allow-ip IPv6 или --allow-ip LAN_ПОДСЕТЬ/64'
+    [[ -n "$router_ip" ]] || die 'Обязателен адрес роутера: --allow-ip 200:… (без /7)'
+    [[ -n "$lan_subnet" ]] || die 'Обязательна LAN-подсеть: --allow-ip 300:…/64'
+    ALLOW_IPS=("$router_ip" "$lan_subnet" "${extra_ips[@]}")
+    printf '\n  IPv6 роутера: %s\n  Подсеть LAN:  %s\n' "$router_ip" "$lan_subnet" >&3
     if [[ -z "${SSH_PORT:-}" && -s "$BASE/access.json" ]]; then
         SSH_PORT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ssh_port",22))' "$BASE/access.json")
     fi
@@ -355,9 +394,9 @@ while (($#)); do
             cat <<'HELP'
 Yggdrasil + VLESS Reality — интерактивный установщик
 sudo bash install-ygg-vless.sh
-sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488 --allow-ip 200:1111:2222:3333:4444:5555:6666:7777
+sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488 --allow-ip 200:1111:2222:3333:4444:5555:6666:7777 --allow-ip 300:1111:2222:3333::/64
 sudo ygg-vless --result | --show-link | --status | --test | --tachyon
---allow-ip IPv6       IPv6 клиента или LAN-подсеть 300:…/64 (можно несколько)
+--allow-ip IPv6       обязательны адрес роутера 200:… и LAN 300:…/64; повторите флаг
 --ssh-port PORT       порт SSH через Yggdrasil, по умолчанию 22
 --peer URI             заменить список пиров (можно несколько)
 --reality-server HOST  домен TLS 1.3 для рукопожатия Reality

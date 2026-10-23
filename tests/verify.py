@@ -19,7 +19,7 @@ blocks=re.findall(r"<<'PY'\n(.*?)\nPY", script, re.S)
 for i, block in enumerate(blocks): compile(block, f'embedded-{i}', 'exec')
 print(f'PASS: {len(blocks)} embedded Python programs compile')
 normalizer=next(b for b in blocks if "Ошибка списка доступа:" in b)
-for args,expected in [(['200:db8::1','300:db8:1:1::/64'],True),(['300:db8:1:1::1/128'],True),
+for args,expected in [(['200:db8::1','300:db8:1:1::/64'],True),(['300:db8:1:1::1/128'],False),(['200:db8::1'],False),(['300:db8:1:1::/64'],False),(['--router','200:db8::1'],True),(['--lan','300:db8:1:1::/64'],True),(['--router','300:db8:1:1::/64'],False),(['--lan','200:db8::1'],False),
                       (['200::/7'],False),(['300::/8'],False),(['300:db8:1:1::1/64'],False),
                       (['2001:db8::1'],False),(['300:db8::1%eth0'],False),([],False)]:
     r=subprocess.run([sys.executable,'-c',normalizer,*args],capture_output=True,text=True)
