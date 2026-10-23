@@ -162,7 +162,7 @@ fi
 log "Installing dependencies ($ID, $ARCH)"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd
+apt-get install -y ca-certificates curl jq python3 python3-hjson iproute2 iputils-ping tar coreutils kmod util-linux passwd
 modprobe tun 2>/dev/null || true
 [[ -c /dev/net/tun ]] || die '/dev/net/tun unavailable; enable TUN in the VPS/container control panel'
 install -d -m 700 "$BASE" "$BASE/backups"
@@ -197,6 +197,15 @@ if [[ ! -s "$YGG_CONFIG" ]]; then
 else
     cp -p "$YGG_CONFIG" "$BASE/backups/yggdrasil.conf.$STAMP"
     "$YGG_BIN" -useconffile "$YGG_CONFIG" -normaliseconf -json >"$TMP/ygg-original.json"
+    # Yggdrasil 0.5.14 deliberately clears AdminListen in -normaliseconf output.
+    # Restore an explicitly configured socket from the original HJSON/JSON file.
+    python3 - "$YGG_CONFIG" "$TMP/ygg-original.json" <<'PY'
+import hjson,json,sys
+with open(sys.argv[1]) as f: original=hjson.load(f)
+with open(sys.argv[2]) as f: normalized=json.load(f)
+if 'AdminListen' in original: normalized['AdminListen']=original['AdminListen']
+with open(sys.argv[2],'w') as f: json.dump(normalized,f,indent=2)
+PY
 fi
 python3 - "$TMP/ygg-original.json" "$TMP/yggdrasil.json" "${PEERS[@]}" <<'PY'
 import json,sys
@@ -210,7 +219,7 @@ elif not c.get('Peers') and not any(c.get('InterfacePeers',{}).values()):
       'tls://vpn.itrus.su:7992']
 # Retain existing listeners and multicast settings. Fresh nodes need only outbound peers.
 if not c.get('AdminListen') or c['AdminListen']=='none':
-    c['AdminListen']='unix:///var/run/yggdrasil.sock'
+    c['AdminListen']='unix:///var/run/yggdrasil/yggdrasil.sock'
 if not c.get('IfName') or c['IfName']=='none': c['IfName']='ygg0'
 with open(sys.argv[2],'w') as f: json.dump(c,f,indent=2)
 PY
@@ -233,6 +242,10 @@ log 'Waiting for Yggdrasil address and at least one connected peer (up to 90 sec
 READY=0
 READY_DEADLINE=$((SECONDS + 90))
 while (( SECONDS < READY_DEADLINE )); do
+    if systemctl is-failed --quiet yggdrasil; then
+        journalctl -u yggdrasil -n 30 --no-pager
+        die 'Yggdrasil service failed; see its log above'
+    fi
     if ip -j -6 address show | jq -e --arg a "$ADDRESS" 'any(.[].addr_info[]?; .local == $a)' >/dev/null && \
        timeout 3 yggdrasilctl -endpoint="$ADMIN" -json getPeers >"$TMP/peers.json" 2>/dev/null && \
        jq -e 'any(.peers[]?; .up == true)' "$TMP/peers.json" >/dev/null; then

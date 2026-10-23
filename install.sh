@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 VERSION=v1.0.1
-INSTALLER_SHA256=0f5a57e487fd93db725eac09c759874e5ca6d3aa8da3b886f510d74cac8ae402
+INSTALLER_SHA256=848e7f3da741682d221d77ab2e7e9e8aa7e123d974eb32fdf8c4870cc2088f4b
 URL="https://github.com/BrainDeLook/yggdrasil-vless/releases/download/$VERSION/install-ygg-vless.sh"
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf '%s\n' 'Yggdrasil + VLESS installer for Debian 12+/Ubuntu 22.04+, amd64/arm64.' \
