@@ -16,6 +16,23 @@ TMP=''
 TEST_PID=''
 log() { printf '\n[ygg-vless] %s\n' "$*"; }
 die() { printf '\nERROR: %s\n' "$*" >&2; exit 1; }
+detect_ygg_config() {
+    # The packaged unit is authoritative; old releases used /etc/yggdrasil.conf.
+    # Do not pick an orphan file left by a previous installer over the unit's file.
+    local start
+    start=$(systemctl show yggdrasil.service --property=ExecStart --value)
+    python3 - "$start" <<'PY'
+import re,sys
+s=sys.argv[1]
+m=re.search(r'-useconffile(?:=|\s+)(?:"([^"\n]+)"|([^\s;}]+))',s)
+if not m:
+    sys.exit('Cannot determine Yggdrasil config path from systemd ExecStart; refusing to guess')
+p=m.group(1) or m.group(2)
+if not p.startswith('/') or '$' in p:
+    sys.exit('Unsupported Yggdrasil config path in systemd unit: '+p)
+print(p)
+PY
+}
 cleanup() {
     if [[ -n "$TEST_PID" ]]; then kill "$TEST_PID" 2>/dev/null || true; wait "$TEST_PID" 2>/dev/null || true; fi
     if [[ -n "$TMP" && "$TMP" == /tmp/ygg-vless.* ]]; then rm -rf -- "$TMP"; fi
@@ -173,11 +190,13 @@ else
 fi
 command -v yggdrasilctl >/dev/null || die 'yggdrasilctl not found; install the official Yggdrasil package'
 YGG_BIN=$(command -v yggdrasil)
-if [[ ! -s /etc/yggdrasil.conf ]]; then
+YGG_CONFIG=$(detect_ygg_config)
+log "Using Yggdrasil service configuration: $YGG_CONFIG"
+if [[ ! -s "$YGG_CONFIG" ]]; then
     "$YGG_BIN" -genconf -json >"$TMP/ygg-original.json"
 else
-    cp -p /etc/yggdrasil.conf "$BASE/backups/yggdrasil.conf.$STAMP"
-    "$YGG_BIN" -useconffile /etc/yggdrasil.conf -normaliseconf -json >"$TMP/ygg-original.json"
+    cp -p "$YGG_CONFIG" "$BASE/backups/yggdrasil.conf.$STAMP"
+    "$YGG_BIN" -useconffile "$YGG_CONFIG" -normaliseconf -json >"$TMP/ygg-original.json"
 fi
 python3 - "$TMP/ygg-original.json" "$TMP/yggdrasil.json" "${PEERS[@]}" <<'PY'
 import json,sys
@@ -197,11 +216,11 @@ with open(sys.argv[2],'w') as f: json.dump(c,f,indent=2)
 PY
 "$YGG_BIN" -useconffile "$TMP/yggdrasil.json" -normaliseconf -json >/dev/null
 if getent group yggdrasil >/dev/null; then
-    install -o root -g yggdrasil -m 640 "$TMP/yggdrasil.json" /etc/yggdrasil.conf
+    install -o root -g yggdrasil -m 640 "$TMP/yggdrasil.json" "$YGG_CONFIG"
 else
-    install -o root -g root -m 600 "$TMP/yggdrasil.json" /etc/yggdrasil.conf
+    install -o root -g root -m 600 "$TMP/yggdrasil.json" "$YGG_CONFIG"
 fi
-ADDRESS=$("$YGG_BIN" -useconffile /etc/yggdrasil.conf -address)
+ADDRESS=$("$YGG_BIN" -useconffile "$YGG_CONFIG" -address)
 python3 - "$ADDRESS" <<'PY'
 import ipaddress,sys
 a=ipaddress.IPv6Address(sys.argv[1])
@@ -212,7 +231,8 @@ systemctl enable yggdrasil
 systemctl restart yggdrasil
 log 'Waiting for Yggdrasil address and at least one connected peer (up to 90 seconds)'
 READY=0
-for _ in {1..45}; do
+READY_DEADLINE=$((SECONDS + 90))
+while (( SECONDS < READY_DEADLINE )); do
     if ip -j -6 address show | jq -e --arg a "$ADDRESS" 'any(.[].addr_info[]?; .local == $a)' >/dev/null && \
        timeout 3 yggdrasilctl -endpoint="$ADMIN" -json getPeers >"$TMP/peers.json" 2>/dev/null && \
        jq -e 'any(.peers[]?; .up == true)' "$TMP/peers.json" >/dev/null; then

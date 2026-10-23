@@ -17,6 +17,17 @@ script=(root/'install-ygg-vless.sh').read_text(encoding='utf-8')
 blocks=re.findall(r"<<'PY'\n(.*?)\nPY", script, re.S)
 for i, block in enumerate(blocks): compile(block, f'embedded-{i}', 'exec')
 print(f'PASS: {len(blocks)} embedded Python programs compile')
+resolver=next(b for b in blocks if "Cannot determine Yggdrasil config path" in b)
+for value, expected in [
+    ('{ path=/usr/bin/yggdrasil ; argv[]=/usr/bin/yggdrasil -useconffile /etc/yggdrasil/yggdrasil.conf ; ignore_errors=no ; }','/etc/yggdrasil/yggdrasil.conf'),
+    ('{ argv[]=/usr/bin/yggdrasil -useconffile /etc/yggdrasil.conf ; }','/etc/yggdrasil.conf'),
+    ('/usr/bin/yggdrasil -useconffile="/etc/custom dir/yggdrasil.conf"','/etc/custom dir/yggdrasil.conf')]:
+    r=subprocess.run([sys.executable,'-c',resolver,value],check=True,capture_output=True,text=True)
+    assert r.stdout.strip()==expected
+for value in ['/usr/bin/yggdrasil -autoconf', '/usr/bin/yggdrasil -useconffile $CONFIG']:
+    r=subprocess.run([sys.executable,'-c',resolver,value],capture_output=True)
+    assert r.returncode!=0
+print('PASS: packaged/legacy/custom systemd config paths detected; ambiguous unit rejected')
 scratch=tempfile.TemporaryDirectory(prefix='ygg-vless-verify-')
 work=Path(scratch.name)
 def runblock(marker,args):

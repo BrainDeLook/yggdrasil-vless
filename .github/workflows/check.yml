@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check Bash syntax and help
         run: |
-          bash -n install.sh install-ygg-vless.sh
+          bash -n install.sh install-ygg-vless.sh tests/install-smoke.sh
           bash install.sh --help
           bash install-ygg-vless.sh --help
           sha256sum -c SHA256SUMS
@@ -31,3 +31,12 @@ jobs:
         env:
           SING_BOX_BINARY: .test-bin/sing-box-1.14.3-linux-amd64/sing-box
         run: python3 tests/verify.py
+  install-smoke:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the real Yggdrasil package and run the full installer twice
+        run: sudo bash tests/install-smoke.sh
+      - name: Show service logs on failure
+        if: failure()
+        run: sudo journalctl -u yggdrasil -u ygg-vless -n 100 --no-pager
