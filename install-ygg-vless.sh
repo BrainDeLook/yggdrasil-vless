@@ -10,7 +10,7 @@ YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
 INSTALLER_VERSION=1.2.0
 ALLOW_IPS=()
-SSH_PORT=22
+SSH_PORT=''
 MODE=install
 PORT=''
 NODE_NAME=''
@@ -106,6 +106,10 @@ configure_wizard() {
         if [[ -n "$answer" ]]; then read -r -a ALLOW_IPS <<<"$answer"; fi
     fi
     [[ ${#ALLOW_IPS[@]} -gt 0 ]] || die 'Нужен хотя бы один IPv6 клиента: --allow-ip 200:… (можно повторять)'
+    if [[ -z "${SSH_PORT:-}" && -s "$BASE/access.json" ]]; then
+        SSH_PORT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ssh_port",22))' "$BASE/access.json")
+    fi
+    SSH_PORT=${SSH_PORT:-22}
     NODE_NAME=${NODE_NAME:-$old_name}
     PORT=${PORT:-$old_port}
     REALITY_SERVER=${REALITY_SERVER:-$old_reality}

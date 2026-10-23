@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 umask 077
 VERSION=v1.2.0
-INSTALLER_SHA256=1831a56afcc42688f0a87b84d2335e211d74e72df3f9e5dfb70ce9984a72be11
+INSTALLER_SHA256=330f7b757b4a292a3d468fffe468990a79b428fae4b32cc8d7539a89042ece57
 URL="https://github.com/BrainDeLook/yggdrasil-vless/releases/download/$VERSION/install-ygg-vless.sh"
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf '%s\n' 'Yggdrasil + VLESS Reality — интерактивная установка на Debian / Ubuntu.' \
