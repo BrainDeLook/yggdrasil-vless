@@ -8,7 +8,7 @@ APP=/opt/ygg-vless
 SERVICE=ygg-vless
 YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
-INSTALLER_VERSION=1.2.0
+INSTALLER_VERSION=1.3.0
 ALLOW_IPS=()
 SSH_PORT=''
 MODE=install
@@ -22,8 +22,17 @@ FIREWALL_READY=0
 PEERS=()
 TMP=''
 TEST_PID=''
-log() { printf '\n  %s\n' "$*" >&3; }
-die() { printf '\n  Ошибка: %s\n' "$*" >&3; [[ -z "$INSTALL_LOG" ]] || printf '  Журнал: %s\n' "$INSTALL_LOG" >&3; exit 1; }
+C_RESET='' C_CYAN='' C_GREEN='' C_YELLOW='' C_RED='' C_BOLD=''
+if [[ -t 3 && ${TERM:-} != dumb && ! ${NO_COLOR+x} ]]; then
+    C_RESET=$'\033[0m' C_CYAN=$'\033[36m' C_GREEN=$'\033[32m'
+    C_YELLOW=$'\033[33m' C_RED=$'\033[31m' C_BOLD=$'\033[1m'
+fi
+log() {
+    local color=$C_CYAN
+    [[ "$*" != '✓'* ]] || color=$C_GREEN
+    printf '\n  %s%s%s\n' "$color" "$*" "$C_RESET" >&3
+}
+die() { printf '\n  %sОшибка: %s%s\n' "$C_RED" "$*" "$C_RESET" >&3; [[ -z "$INSTALL_LOG" ]] || printf '  Журнал: %s\n' "$INSTALL_LOG" >&3; exit 1; }
 on_error() {
     printf '\n  Установка остановлена. Изменения не завершены.\n' >&3
     if [[ -n "$INSTALL_LOG" ]]; then
@@ -34,41 +43,64 @@ on_error() {
 }
 show_result() {
     python3 - "$BASE" <<'PY'
-import json,pathlib,sys
+import json,pathlib,sys,os
+colored=sys.stdout.isatty() and os.environ.get('TERM')!='dumb' and 'NO_COLOR' not in os.environ
+def tint(text,code): return '\033['+code+'m'+text+'\033[0m' if colored else text
 base=pathlib.Path(sys.argv[1])
 settings=json.loads((base/'settings.json').read_text(encoding='utf-8'))
 link=(base/'client.txt').read_text(encoding='utf-8').strip()
 tachyon=(base/'client-tachyon.json').read_text(encoding='utf-8').strip()
-def panel(title,content):
+def panel(title,content,color="36"):
     # Keep the payload unprefixed and unwrapped: copy/paste must preserve valid JSON/URI.
     width=72
-    print('\n  ┌'+'─'*(width-2)+'┐')
-    print('  │ '+title.ljust(width-4)+' │')
-    print('  ├'+'─'*(width-2)+'┤\n')
+    print(tint('\n  ┌'+'─'*(width-2)+'┐',color))
+    print(tint('  │ '+title.ljust(width-4)+' │','1;'+color))
+    print(tint('  ├'+'─'*(width-2)+'┤',color)+'\n')
     print(content)
-    print('\n  └'+'─'*(width-2)+'┘')
-print('\n  ГОТОВО — '+settings['name'])
+    print(tint('\n  └'+'─'*(width-2)+'┘',color))
+print(tint('\n  ГОТОВО — '+settings['name'],'1;32'))
 print('  Адрес: '+settings['address']+'   Порт: '+str(settings['port']))
 if (base/'access.json').exists():
     access=json.loads((base/'access.json').read_text())
     panel('SSH · АДРЕС НОДЫ И КОМАНДА ВХОДА',
-          'IPv6: '+settings['address']+'\n\nssh -6 -p '+str(access['ssh_port'])+' '+access['ssh_user']+'@'+settings['address']+'\n\nРазрешённые адреса клиентов:\n'+'\n'.join(access['allowed_ips']))
+          'IPv6: '+settings['address']+'\n\nssh -6 -p '+str(access['ssh_port'])+' '+access['ssh_user']+'@'+settings['address']+'\n\nРазрешённые адреса клиентов:\n'+'\n'.join(access['allowed_ips']),'32')
     print('  Для SSH используйте существующий ключ или пароль пользователя сервера.')
-panel('ССЫЛКА · INCY / Xray / sing-box',link)
-panel('КОНФИГУРАЦИЯ ТАХИОНА · JSON с привязкой интерфейса',tachyon)
+panel('ССЫЛКА · INCY / Xray / sing-box',link,'35')
+panel('КОНФИГУРАЦИЯ ТАХИОНА · JSON с привязкой интерфейса',tachyon,'34')
 print('\n  Скопируйте JSON целиком, от { до }, в подключение Тахиона.')
 print('  В нём уже указано bind_interface: "yggdrasil".')
 print('  Если интерфейс на роутере называется иначе, замените только его имя.')
 PY
 }
+normalize_access() {
+    python3 - "$@" <<'PY'
+import ipaddress,sys
+result=set()
+try:
+    for value in sys.argv[1:]:
+        if '%' in value: raise ValueError('Не указывайте зону интерфейса в IPv6')
+        net=ipaddress.IPv6Network(value,strict=True)
+        if not net.subnet_of(ipaddress.IPv6Network('200::/7')):
+            raise ValueError('Нужен адрес Yggdrasil из 200::/7')
+        if net.prefixlen<128 and (net.prefixlen<64 or not net.subnet_of(ipaddress.IPv6Network('300::/8'))):
+            raise ValueError('Для LAN разрешены подсети 300:…/64 или более узкие; адрес 200:… укажите без /7')
+        result.add(str(net.network_address) if net.prefixlen==128 else str(net))
+    if not result: raise ValueError('Укажите хотя бы один IP или LAN-подсеть')
+except ValueError as e:
+    sys.exit('Ошибка списка доступа: '+str(e))
+print('\n'.join(sorted(result)))
+PY
+}
 configure_wizard() {
-    local old_name='Yggdrasil VLESS' old_port=1488 old_reality='www.microsoft.com' answer
+    local old_name='Yggdrasil VLESS' old_port=1488 old_reality='www.microsoft.com' answer normalized
     if [[ -s "$BASE/settings.json" ]] && command -v python3 >/dev/null; then
         old_name=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("name","Yggdrasil VLESS"))')
         old_port=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("port",1488))')
         old_reality=$(python3 -c 'import json;print(json.load(open("/etc/ygg-vless/settings.json")).get("reality_server","www.microsoft.com"))')
     fi
+    printf '%s' "$C_BOLD$C_CYAN" >&3
     printf '\n  ┌──────────────────────────────────────────┐\n  │       Yggdrasil + VLESS Reality           │\n  └──────────────────────────────────────────┘\n\n' >&3
+    printf '%s' "$C_RESET" >&3
     printf '  Установщик %s · Debian / Ubuntu\n' "$INSTALLER_VERSION" >&3
     printf '  Настроит сеть Yggdrasil, защищённый прокси и автозапуск.\n' >&3
     if [[ -s "$BASE/settings.json" ]]; then
@@ -77,8 +109,10 @@ configure_wizard() {
     fi
     if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
         if [[ -z "$NODE_NAME" ]]; then
+            printf '%s' "$C_YELLOW" >&3
             printf '\n  Название подключения [%s]: ' "$old_name" >&3
             IFS= read -r answer
+            printf '%s' "$C_RESET" >&3
             NODE_NAME=${answer:-$old_name}
         fi
         if [[ -z "$PORT" ]]; then
@@ -95,17 +129,35 @@ configure_wizard() {
         mapfile -t ALLOW_IPS < <(python3 -c 'import json,sys;print("\n".join(json.load(open(sys.argv[1]))["allowed_ips"]))' "$BASE/access.json")
     fi
     if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
-        printf '\n  ДОСТУП К НОДЕ · SSH и прокси только для ваших IPv6\n' >&3
-        printf '  С роутера: его адрес 200:… (пример: 200:1111:2222:3333:4444:5555:6666:7777).\n' >&3
-        printf '  С ПК за роутером: адрес самого ПК 300:… (пример: 300:1111:2222:3333::1234).\n' >&3
-        printf '  300:…/64 — подсеть LAN, а не адрес роутера. Здесь вводите отдельные IP.\n' >&3
-        printf '  На клиенте адрес источника показывает: ip -6 route get IPv6_НОДЫ (поле src).\n' >&3
-        printf '  Несколько адресов разделяйте пробелами. Адрес сервера сюда не вводите.\n' >&3
-        printf '  Разрешённые IP [%s]: ' "${ALLOW_IPS[*]:-не заданы}" >&3
-        IFS= read -r answer
-        if [[ -n "$answer" ]]; then read -r -a ALLOW_IPS <<<"$answer"; fi
+        printf '%s' "$C_CYAN" >&3
+        printf '\n  ДОСТУП К НОДЕ · SSH и прокси\n' >&3
+        printf '  1. На роутере откройте интерфейс Yggdrasil.\n' >&3
+        printf '  2. Возьмите IPv6: 200:… БЕЗ /7 — доступ с самого роутера.\n' >&3
+        printf '     Пример: 200:1111:2222:3333:4444:5555:6666:7777\n' >&3
+        printf '  3. Возьмите IPv6-PD: 300:…/64 ВМЕСТЕ с /64 — доступ со всей LAN.\n' >&3
+        printf '     Пример: 300:1111:2222:3333::/64\n' >&3
+        printf '  Адрес ПК может меняться внутри подсети — разрешение /64 сохранится.\n' >&3
+        printf '  Для роутера и его LAN укажите ОБА значения через пробел.\n' >&3
+        printf '%s' "$C_YELLOW" >&3
+        printf '  /64 разрешает все устройства этой LAN. SSH всё равно требует ключ/пароль.\n' >&3
+        printf '  Адрес VPS в список не вводите. Отдельные IP 300:… тоже поддерживаются.\n' >&3
+        while true; do
+            printf '  Разрешённые IP / подсети [%s]: ' "${ALLOW_IPS[*]:-не заданы}" >&3
+            IFS= read -r answer
+            if [[ -n "$answer" ]]; then read -r -a ALLOW_IPS <<<"$answer"; fi
+            if [[ ${#ALLOW_IPS[@]} == 0 ]]; then
+                printf '  Введите адрес роутера и/или подсеть LAN.\n' >&3
+                continue
+            fi
+            if ! command -v python3 >/dev/null; then break; fi
+            if normalized=$(normalize_access "${ALLOW_IPS[@]}" 2>&1); then
+                mapfile -t ALLOW_IPS <<<"$normalized"; break
+            fi
+            printf '  %s\n' "$normalized" >&3
+        done
+        printf '%s' "$C_RESET" >&3
     fi
-    [[ ${#ALLOW_IPS[@]} -gt 0 ]] || die 'Нужен хотя бы один IPv6 клиента: --allow-ip 200:… (можно повторять)'
+    [[ ${#ALLOW_IPS[@]} -gt 0 ]] || die 'Укажите --allow-ip IPv6 или --allow-ip LAN_ПОДСЕТЬ/64'
     if [[ -z "${SSH_PORT:-}" && -s "$BASE/access.json" ]]; then
         SSH_PORT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("ssh_port",22))' "$BASE/access.json")
     fi
@@ -199,11 +251,11 @@ UNIT
     python3 - "$BASE" "$ADDRESS" "$SSH_PORT" "$ssh_user" "${ALLOW_IPS[@]}" <<'PY'
 import ipaddress,json,pathlib,sys
 base=pathlib.Path(sys.argv[1]); address=str(ipaddress.IPv6Address(sys.argv[2]))
-allowed=sorted({str(ipaddress.IPv6Address(a)) for a in sys.argv[5:]})
+allowed=sorted(set(sys.argv[5:])) # Already validated and normalized before changing services.
 (base/'access.json').write_text(json.dumps({'ssh_port':int(sys.argv[3]),'ssh_user':sys.argv[4],'allowed_ips':allowed},indent=2)+'\n')
 # Only this node destination is filtered; the public SSH path is untouched.
 rules='''table inet ygg_vless_access {
- set clients { type ipv6_addr; elements = { ALLOWED } }
+ set clients { type ipv6_addr; flags interval; auto-merge; elements = { ALLOWED } }
  chain input {
   type filter hook input priority -10; policy accept;
   ip6 daddr ADDRESS jump node
@@ -300,7 +352,7 @@ Yggdrasil + VLESS Reality — интерактивный установщик
 sudo bash install-ygg-vless.sh
 sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488 --allow-ip 200:1111:2222:3333:4444:5555:6666:7777
 sudo ygg-vless --result | --show-link | --status | --test | --tachyon
---allow-ip IPv6       разрешённый IP клиента, 200:… или 300:… (можно несколько)
+--allow-ip IPv6       IPv6 клиента или LAN-подсеть 300:…/64 (можно несколько)
 --ssh-port PORT       порт SSH через Yggdrasil, по умолчанию 22
 --peer URI             заменить список пиров (можно несколько)
 --reality-server HOST  домен TLS 1.3 для рукопожатия Reality
@@ -420,13 +472,9 @@ log '[1/6] Установка необходимых пакетов. Подро�
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd openssl openssh-server nftables
-python3 - "$SSH_PORT" "${ALLOW_IPS[@]}" <<'PY'
-import ipaddress,sys
-assert sys.argv[1].isascii() and sys.argv[1].isdigit() and 1<=int(sys.argv[1])<=65535, 'Invalid SSH port'
-for value in sys.argv[2:]:
-    assert '/' not in value and '%' not in value, 'Enter individual client IPv6 addresses, without prefix or zone'
-    assert ipaddress.IPv6Address(value) in ipaddress.IPv6Network('200::/7'), 'Client address must belong to Yggdrasil 200::/7'
-PY
+[[ "$SSH_PORT" =~ ^[0-9]{1,5}$ && $((10#$SSH_PORT)) -ge 1 && $((10#$SSH_PORT)) -le 65535 ]] || die 'SSH-порт должен быть числом от 1 до 65535'
+normalized=$(normalize_access "${ALLOW_IPS[@]}") || die 'Исправьте IP или подсеть в списке доступа'
+mapfile -t ALLOW_IPS <<<"$normalized"
 [[ "$SSH_PORT" != "$PORT" ]] || die 'Порты SSH и прокси должны различаться'
 modprobe tun 2>/dev/null || true
 [[ -c /dev/net/tun ]] || die 'Недоступен /dev/net/tun. Включите TUN в панели VPS или контейнера.'

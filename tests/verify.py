@@ -18,6 +18,13 @@ script=(root/'install-ygg-vless.sh').read_text(encoding='utf-8')
 blocks=re.findall(r"<<'PY'\n(.*?)\nPY", script, re.S)
 for i, block in enumerate(blocks): compile(block, f'embedded-{i}', 'exec')
 print(f'PASS: {len(blocks)} embedded Python programs compile')
+normalizer=next(b for b in blocks if "Ошибка списка доступа:" in b)
+for args,expected in [(['200:db8::1','300:db8:1:1::/64'],True),(['300:db8:1:1::1/128'],True),
+                      (['200::/7'],False),(['300::/8'],False),(['300:db8:1:1::1/64'],False),
+                      (['2001:db8::1'],False),(['300:db8::1%eth0'],False),([],False)]:
+    r=subprocess.run([sys.executable,'-c',normalizer,*args],capture_output=True,text=True)
+    assert (r.returncode==0)==expected,(args,r.stderr)
+print('PASS: node IP and LAN /64 accepted; public IPv6, broad ranges and host bits rejected')
 resolver=next(b for b in blocks if "Cannot determine Yggdrasil config path" in b)
 for value, expected in [
     ('{ path=/usr/bin/yggdrasil ; argv[]=/usr/bin/yggdrasil -useconffile /etc/yggdrasil/yggdrasil.conf ; ignore_errors=no ; }','/etc/yggdrasil/yggdrasil.conf'),

@@ -36,7 +36,7 @@ yggdrasil -useconffile "$SCRATCH/peer.json" >"$SCRATCH/peer.log" 2>&1 &
 PEER_PID=$!
 sleep 1
 kill -0 "$PEER_PID"
-bash "$ROOT/install-ygg-vless.sh" --yes --ssh-port 2222 --allow-ip 200:db8::111 --name 'Тестовая нода NL' --peer "tcp://127.0.0.1:$PORT" --firewall-ready
+bash "$ROOT/install-ygg-vless.sh" --yes --ssh-port 2222 --allow-ip 200:db8::111 --allow-ip 300:db8:1:1::/64 --allow-ip 300:db8:1:1::111 --name 'Тестовая нода NL' --peer "tcp://127.0.0.1:$PORT" --firewall-ready
 AFTER=$(yggdrasil -useconffile "$ACTIVE" -address)
 test "$BEFORE" = "$AFTER"
 test "$ORPHAN_SHA" = "$(sha256sum /etc/yggdrasil.conf)"
@@ -60,15 +60,19 @@ ip link set ygg-client netns ygg-test
 ip -6 addr add fd42:1234::1/64 dev ygg-host nodad
 ip link set ygg-host up
 ip -6 route add 200:db8::/64 via fd42:1234::2 dev ygg-host
+ip -6 route add 300:db8:1::/48 via fd42:1234::2 dev ygg-host
 ip netns exec ygg-test ip link set lo up
 ip netns exec ygg-test ip link set ygg-client up
 ip netns exec ygg-test ip -6 addr add fd42:1234::2/64 dev ygg-client nodad
 ip netns exec ygg-test ip -6 addr add 200:db8::111/128 dev ygg-client nodad
 ip netns exec ygg-test ip -6 addr add 200:db8::222/128 dev ygg-client nodad
+for source in 300:db8:1:1::111 300:db8:1:1::222 300:db8:1:2::111; do
+    ip netns exec ygg-test ip -6 addr add "$source/128" dev ygg-client nodad
+done
 ip netns exec ygg-test ip -6 route add "$BEFORE/128" via fd42:1234::1 dev ygg-client
 ip netns exec ygg-test python3 - "$BEFORE" <<'PY'
 import socket,sys
-for source,allowed in [('200:db8::111',True),('200:db8::222',False)]:
+for source,allowed in [('200:db8::111',True),('200:db8::222',False),('300:db8:1:1::111',True),('300:db8:1:1::222',True),('300:db8:1:2::111',False)]:
     for port in [2222,1488]:
         with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
             s.settimeout(3); s.bind((source,0))
@@ -77,7 +81,7 @@ for source,allowed in [('200:db8::111',True),('200:db8::222',False)]:
                 if port==2222: assert s.recv(256).startswith(b'SSH-')
             except (TimeoutError,ConnectionRefusedError): connected=False
             assert connected==allowed,(source,port,connected)
-print('PASS: SSH banner and proxy reachable from allowed IPv6; both blocked for another IPv6')
+print('PASS: SSH and proxy allow node IP and two changing LAN IPs; reject other node and LAN prefix')
 PY
 # Authenticate over IPv6 and execute a command, using a throwaway CI-only key.
 ssh-keygen -q -t ed25519 -N '' -f "$SCRATCH/ssh-key"
