@@ -8,7 +8,9 @@ APP=/opt/ygg-vless
 SERVICE=ygg-vless
 YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
-INSTALLER_VERSION=1.1.1
+INSTALLER_VERSION=1.2.0
+ALLOW_IPS=()
+SSH_PORT=22
 MODE=install
 PORT=''
 NODE_NAME=''
@@ -47,6 +49,11 @@ def panel(title,content):
     print('\n  └'+'─'*(width-2)+'┘')
 print('\n  ГОТОВО — '+settings['name'])
 print('  Адрес: '+settings['address']+'   Порт: '+str(settings['port']))
+if (base/'access.json').exists():
+    access=json.loads((base/'access.json').read_text())
+    panel('SSH · АДРЕС НОДЫ И КОМАНДА ВХОДА',
+          'IPv6: '+settings['address']+'\n\nssh -6 -p '+str(access['ssh_port'])+' '+access['ssh_user']+'@'+settings['address']+'\n\nРазрешённые адреса клиентов:\n'+'\n'.join(access['allowed_ips']))
+    print('  Для SSH используйте существующий ключ или пароль пользователя сервера.')
 panel('ССЫЛКА · INCY / Xray / sing-box',link)
 panel('КОНФИГУРАЦИЯ ТАХИОНА · JSON с привязкой интерфейса',tachyon)
 print('\n  Скопируйте JSON целиком, от { до }, в подключение Тахиона.')
@@ -84,6 +91,21 @@ configure_wizard() {
             done
         fi
     fi
+    if [[ ${#ALLOW_IPS[@]} == 0 && -s "$BASE/access.json" ]]; then
+        mapfile -t ALLOW_IPS < <(python3 -c 'import json,sys;print("\n".join(json.load(open(sys.argv[1]))["allowed_ips"]))' "$BASE/access.json")
+    fi
+    if [[ $ASSUME_YES == 0 && -t 0 && -t 1 ]]; then
+        printf '\n  ДОСТУП К НОДЕ · SSH и прокси только для ваших IPv6\n' >&3
+        printf '  С роутера: его адрес 200:… (пример: 200:1111:2222:3333:4444:5555:6666:7777).\n' >&3
+        printf '  С ПК за роутером: адрес самого ПК 300:… (пример: 300:1111:2222:3333::1234).\n' >&3
+        printf '  300:…/64 — подсеть LAN, а не адрес роутера. Здесь вводите отдельные IP.\n' >&3
+        printf '  На клиенте адрес источника показывает: ip -6 route get IPv6_НОДЫ (поле src).\n' >&3
+        printf '  Несколько адресов разделяйте пробелами. Адрес сервера сюда не вводите.\n' >&3
+        printf '  Разрешённые IP [%s]: ' "${ALLOW_IPS[*]:-не заданы}" >&3
+        IFS= read -r answer
+        if [[ -n "$answer" ]]; then read -r -a ALLOW_IPS <<<"$answer"; fi
+    fi
+    [[ ${#ALLOW_IPS[@]} -gt 0 ]] || die 'Нужен хотя бы один IPv6 клиента: --allow-ip 200:… (можно повторять)'
     NODE_NAME=${NODE_NAME:-$old_name}
     PORT=${PORT:-$old_port}
     REALITY_SERVER=${REALITY_SERVER:-$old_reality}
@@ -108,6 +130,145 @@ if not p.startswith('/') or '$' in p:
 print(p)
 PY
 }
+ssh_probe() {
+    python3 - "$ADDRESS" "$SSH_PORT" <<'PY'
+import socket,sys
+try:
+    with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
+        s.settimeout(2); s.connect((sys.argv[1],int(sys.argv[2])))
+        assert s.recv(256).startswith(b'SSH-'), 'Not an SSH server'
+except (OSError,AssertionError): sys.exit(1)
+PY
+}
+configure_access() {
+    log 'Настраиваю SSH через Yggdrasil и список разрешённых IPv6…'
+    local ssh_user=${SUDO_USER:-root} client service_port
+    id "$ssh_user" >/dev/null || ssh_user=root
+    install -d -m 755 /run/sshd
+    ssh-keygen -A
+    # Reuse a native listener when possible. Otherwise bind a separate sshd only
+    # to the Yggdrasil address; never broaden or restart the public SSH listener.
+    if systemctl is-active --quiet ygg-vless-ssh || ! ssh_probe; then
+        python3 - "$ADDRESS" "$SSH_PORT" "$TMP/sshd_config" <<'PY'
+import glob,pathlib,shlex,sys
+lines=[]; stack=[]; in_match=False
+def expand(path):
+    global in_match
+    path=pathlib.Path(path).resolve()
+    if path in stack: raise ValueError('Recursive sshd Include: '+str(path))
+    stack.append(path)
+    for raw in path.read_text().splitlines():
+        parts=shlex.split(raw,comments=True)
+        if not parts: continue
+        key=parts[0].lower()
+        if key=='include':
+            for pattern in parts[1:]:
+                if not pattern.startswith('/'): pattern='/etc/ssh/'+pattern
+                for child in sorted(glob.glob(pattern)): expand(child)
+        else:
+            if key=='match': in_match=True
+            if not in_match and key in {'port','listenaddress','addressfamily','pidfile'}: continue
+            lines.append(raw)
+    stack.pop()
+expand('/etc/ssh/sshd_config')
+header=f'Port {int(sys.argv[2])}\nAddressFamily inet6\nListenAddress {sys.argv[1]}\nPidFile /run/ygg-vless-sshd.pid\n'
+pathlib.Path(sys.argv[3]).write_text(header+'\n'.join(lines)+'\n')
+PY
+        /usr/sbin/sshd -t -f "$TMP/sshd_config"
+        install -m 600 "$TMP/sshd_config" "$BASE/sshd_config"
+        cat >/etc/systemd/system/ygg-vless-ssh.service <<'UNIT'
+[Unit]
+Description=SSH on the Yggdrasil address
+After=network-online.target yggdrasil.service ygg-vless-access.service
+Wants=yggdrasil.service
+Requires=ygg-vless-access.service
+StartLimitIntervalSec=0
+[Service]
+ExecStartPre=/usr/sbin/sshd -t -f /etc/ygg-vless/sshd_config
+ExecStart=/usr/sbin/sshd -D -e -f /etc/ygg-vless/sshd_config
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+UNIT
+    fi
+    python3 - "$BASE" "$ADDRESS" "$SSH_PORT" "$ssh_user" "${ALLOW_IPS[@]}" <<'PY'
+import ipaddress,json,pathlib,sys
+base=pathlib.Path(sys.argv[1]); address=str(ipaddress.IPv6Address(sys.argv[2]))
+allowed=sorted({str(ipaddress.IPv6Address(a)) for a in sys.argv[5:]})
+(base/'access.json').write_text(json.dumps({'ssh_port':int(sys.argv[3]),'ssh_user':sys.argv[4],'allowed_ips':allowed},indent=2)+'\n')
+# Only this node destination is filtered; the public SSH path is untouched.
+rules='''table inet ygg_vless_access {
+ set clients { type ipv6_addr; elements = { ALLOWED } }
+ chain input {
+  type filter hook input priority -10; policy accept;
+  ip6 daddr ADDRESS jump node
+ }
+ chain node {
+  iifname "lo" accept
+  ct state established,related accept
+  icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept
+  ip6 saddr @clients accept
+  counter drop
+ }
+}
+'''
+(base/'access.nft').write_text(rules.replace('ADDRESS',address).replace('ALLOWED',', '.join(allowed)))
+PY
+    cat >"$APP/apply-access.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+scratch=$(mktemp)
+trap 'rm -f -- "$scratch"' EXIT
+if nft list table inet ygg_vless_access >/dev/null 2>&1; then
+    printf 'delete table inet ygg_vless_access\n' >"$scratch"
+fi
+cat /etc/ygg-vless/access.nft >>"$scratch"
+nft -c -f "$scratch"
+nft -f "$scratch"
+SH
+    chmod 700 "$APP/apply-access.sh"
+    cat >/etc/systemd/system/ygg-vless-access.service <<'UNIT'
+[Unit]
+Description=Yggdrasil node client allowlist
+After=network-pre.target nftables.service ufw.service firewalld.service
+Before=ygg-vless.service ygg-vless-ssh.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/ygg-vless/apply-access.sh
+ExecReload=/opt/ygg-vless/apply-access.sh
+ExecStop=-/usr/sbin/nft delete table inet ygg_vless_access
+[Install]
+WantedBy=multi-user.target
+UNIT
+    for client in "${ALLOW_IPS[@]}"; do
+        for service_port in "$PORT" "$SSH_PORT"; do
+            if [[ "$FW" == ufw ]]; then
+                ufw allow in from "$client" to "$ADDRESS" port "$service_port" proto tcp comment 'ygg-vless'
+            elif [[ "$FW" == firewalld ]]; then
+                local zone rule
+                zone=$(firewall-cmd --get-zone-of-interface="$IFACE" 2>/dev/null || true)
+                [[ -n "$zone" && "$zone" != 'no zone' ]] || zone=$(firewall-cmd --get-default-zone)
+                rule="rule family=ipv6 source address=$client destination address=$ADDRESS port port=$service_port protocol=tcp accept"
+                firewall-cmd --permanent --zone="$zone" --add-rich-rule="$rule"
+                firewall-cmd --zone="$zone" --add-rich-rule="$rule"
+            fi
+        done
+    done
+    systemctl daemon-reload
+    systemctl enable ygg-vless-access
+    systemctl reload-or-restart ygg-vless-access
+    if [[ -f /etc/systemd/system/ygg-vless-ssh.service ]]; then
+        systemctl enable ygg-vless-ssh
+        systemctl restart ygg-vless-ssh
+    fi
+    local ready=0
+    for _ in {1..10}; do if ssh_probe; then ready=1; break; fi; sleep 1; done
+    [[ $ready == 1 ]] || die 'SSH на Yggdrasil-адресе не отвечает. Смотрите journalctl -u ygg-vless-ssh'
+    log '✓ SSH отвечает на Yggdrasil-адресе. Доступ ограничен указанными IP.'
+}
 cleanup() {
     if [[ -n "$TEST_PID" ]]; then kill "$TEST_PID" 2>/dev/null || true; wait "$TEST_PID" 2>/dev/null || true; fi
     if [[ -n "$TMP" && "$TMP" == /tmp/ygg-vless.* ]]; then rm -rf -- "$TMP"; fi
@@ -125,14 +286,18 @@ while (($#)); do
         --reality-server) [[ $# -ge 2 ]] || die 'Не указан домен после --reality-server'; REALITY_SERVER=$2; shift 2 ;;
         --yes|-y) ASSUME_YES=1; shift ;;
         --port) [[ $# -ge 2 ]] || die 'Не указан порт после --port'; PORT=$2; shift 2 ;;
+        --allow-ip) [[ $# -ge 2 ]] || die "Не указан IP после --allow-ip"; ALLOW_IPS+=("$2"); shift 2 ;;
+        --ssh-port) [[ $# -ge 2 ]] || die "Не указан SSH-порт"; SSH_PORT=$2; shift 2 ;;
         --peer) [[ $# -ge 2 ]] || die 'Не указан адрес пира после --peer'; PEERS+=("$2"); shift 2 ;;
         --firewall-ready) FIREWALL_READY=1; shift ;;
         -h|--help)
             cat <<'HELP'
 Yggdrasil + VLESS Reality — интерактивный установщик
 sudo bash install-ygg-vless.sh
-sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488
+sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488 --allow-ip 200:1111:2222:3333:4444:5555:6666:7777
 sudo ygg-vless --result | --show-link | --status | --test | --tachyon
+--allow-ip IPv6       разрешённый IP клиента, 200:… или 300:… (можно несколько)
+--ssh-port PORT       порт SSH через Yggdrasil, по умолчанию 22
 --peer URI             заменить список пиров (можно несколько)
 --reality-server HOST  домен TLS 1.3 для рукопожатия Reality
 --firewall-ready       нестандартный firewall уже настроен вручную
@@ -239,7 +404,7 @@ if command -v ufw >/dev/null && ufw status | grep -q '^Status: active'; then
     grep -Eq '^IPV6=yes' /etc/default/ufw || die 'В активном UFW отключена поддержка IPv6. Сначала включите IPV6=yes в /etc/default/ufw.'
 elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
     FW=firewalld
-elif [[ $FIREWALL_READY == 0 ]]; then
+elif [[ $FIREWALL_READY == 0 && ! -s "$BASE/access.json" ]]; then
     if command -v nft >/dev/null && nft list ruleset 2>/dev/null | grep 'hook input' >/dev/null; then
         die 'Обнаружен нестандартный nftables firewall. Разрешите входящий TCP-порт прокси на интерфейсе Yggdrasil и повторите с --firewall-ready. Правила не изменены.'
     fi
@@ -250,7 +415,15 @@ fi
 log '[1/6] Установка необходимых пакетов. Подробности записываются в журнал…'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd openssl
+apt-get install -y ca-certificates curl jq python3 iproute2 iputils-ping tar coreutils kmod util-linux passwd openssl openssh-server nftables
+python3 - "$SSH_PORT" "${ALLOW_IPS[@]}" <<'PY'
+import ipaddress,sys
+assert sys.argv[1].isascii() and sys.argv[1].isdigit() and 1<=int(sys.argv[1])<=65535, 'Invalid SSH port'
+for value in sys.argv[2:]:
+    assert '/' not in value and '%' not in value, 'Enter individual client IPv6 addresses, without prefix or zone'
+    assert ipaddress.IPv6Address(value) in ipaddress.IPv6Network('200::/7'), 'Client address must belong to Yggdrasil 200::/7'
+PY
+[[ "$SSH_PORT" != "$PORT" ]] || die 'Порты SSH и прокси должны различаться'
 modprobe tun 2>/dev/null || true
 [[ -c /dev/net/tun ]] || die 'Недоступен /dev/net/tun. Включите TUN в панели VPS или контейнера.'
 install -d -m 700 "$BASE" "$BASE/backups"
@@ -424,20 +597,13 @@ for name in settings.json client.txt client-outbound.json client-tachyon.json; d
 chown root:ygg-vless "$BASE"
 chmod 750 "$BASE"
 install -o root -g ygg-vless -m 640 "$TMP/server.json" "$BASE/server.json"
-if [[ "$FW" == ufw ]]; then
-    ufw allow in on "$IFACE" from 200::/7 to "$ADDRESS" port "$PORT" proto tcp comment 'ygg-vless'
-elif [[ "$FW" == firewalld ]]; then
-    ZONE=$(firewall-cmd --get-zone-of-interface="$IFACE" 2>/dev/null || true)
-    [[ -n "$ZONE" && "$ZONE" != 'no zone' ]] || ZONE=$(firewall-cmd --get-default-zone)
-    RULE="rule family=ipv6 source address=200::/7 destination address=$ADDRESS port port=$PORT protocol=tcp accept"
-    firewall-cmd --permanent --zone="$ZONE" --add-rich-rule="$RULE"
-    firewall-cmd --zone="$ZONE" --add-rich-rule="$RULE"
-fi
+configure_access
 cat >/etc/systemd/system/ygg-vless.service <<'UNIT'
 [Unit]
 Description=VLESS proxy over Yggdrasil
 Wants=network-online.target yggdrasil.service
-After=network-online.target yggdrasil.service
+After=network-online.target yggdrasil.service ygg-vless-access.service
+Requires=ygg-vless-access.service
 StartLimitIntervalSec=0
 
 [Service]

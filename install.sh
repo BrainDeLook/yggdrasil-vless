@@ -2,13 +2,13 @@
 # Versioned downloader. The installer and package hashes are pinned.
 set -Eeuo pipefail
 umask 077
-VERSION=v1.1.1
-INSTALLER_SHA256=afd9fcd047e0dceddb675449df7c0c54807c9a4254ca62ef098320652b927eb3
+VERSION=v1.2.0
+INSTALLER_SHA256=1831a56afcc42688f0a87b84d2335e211d74e72df3f9e5dfb70ce9984a72be11
 URL="https://github.com/BrainDeLook/yggdrasil-vless/releases/download/$VERSION/install-ygg-vless.sh"
 if [[ ${1:-} == --help || ${1:-} == -h ]]; then
     printf '%s\n' 'Yggdrasil + VLESS Reality — интерактивная установка на Debian / Ubuntu.' \
         'Запуск: sudo bash install.sh' \
-        'Без вопросов: sudo bash install.sh --yes --name "Моя нода" --port 1488' \
+        'Без вопросов: sudo bash install.sh --yes --name "Моя нода" --port 1488 --allow-ip IPv6_КЛИЕНТА' \
         'Установщик скачивается из релиза и проверяется по SHA256.'
     exit 0
 fi

@@ -36,7 +36,7 @@ yggdrasil -useconffile "$SCRATCH/peer.json" >"$SCRATCH/peer.log" 2>&1 &
 PEER_PID=$!
 sleep 1
 kill -0 "$PEER_PID"
-bash "$ROOT/install-ygg-vless.sh" --yes --name 'Тестовая нода NL' --peer "tcp://127.0.0.1:$PORT" --firewall-ready
+bash "$ROOT/install-ygg-vless.sh" --yes --allow-ip 200:db8::111 --name 'Тестовая нода NL' --peer "tcp://127.0.0.1:$PORT" --firewall-ready
 AFTER=$(yggdrasil -useconffile "$ACTIVE" -address)
 test "$BEFORE" = "$AFTER"
 test "$ORPHAN_SHA" = "$(sha256sum /etc/yggdrasil.conf)"
@@ -53,4 +53,35 @@ test "$ORPHAN_SHA" = "$(sha256sum /etc/yggdrasil.conf)"
 test "$REALITY_KEY_BEFORE" = "$(jq -r .reality_private_key /etc/ygg-vless/settings.json)"
 test "$(jq -r .name /etc/ygg-vless/settings.json)" = 'Новое имя NL'
 grep -q 'security=reality' /etc/ygg-vless/client.txt
+# Verify access from an actual remote network namespace, with two source IPv6s.
+ip netns add ygg-test
+ip link add ygg-host type veth peer name ygg-client
+ip link set ygg-client netns ygg-test
+ip -6 addr add fd42:1234::1/64 dev ygg-host nodad
+ip link set ygg-host up
+ip -6 route add 200:db8::/64 via fd42:1234::2 dev ygg-host
+ip netns exec ygg-test ip link set lo up
+ip netns exec ygg-test ip link set ygg-client up
+ip netns exec ygg-test ip -6 addr add fd42:1234::2/64 dev ygg-client nodad
+ip netns exec ygg-test ip -6 addr add 200:db8::111/128 dev ygg-client nodad
+ip netns exec ygg-test ip -6 addr add 200:db8::222/128 dev ygg-client nodad
+ip netns exec ygg-test ip -6 route add "$BEFORE/128" via fd42:1234::1 dev ygg-client
+ip netns exec ygg-test python3 - "$BEFORE" <<'PY'
+import socket,sys
+for source,allowed in [('200:db8::111',True),('200:db8::222',False)]:
+    for port in [22,1488]:
+        with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as s:
+            s.settimeout(3); s.bind((source,0))
+            try:
+                s.connect((sys.argv[1],port)); connected=True
+                if port==22: assert s.recv(256).startswith(b'SSH-')
+            except (TimeoutError,ConnectionRefusedError): connected=False
+            assert connected==allowed,(source,port,connected)
+print('PASS: SSH banner and proxy reachable from allowed IPv6; both blocked for another IPv6')
+PY
+ip netns del ygg-test
+ip link del ygg-host
+systemctl is-active --quiet ygg-vless-access
+# Rules and allowlist survive a full rerun; local self-test still works.
+test "$(jq -r '.allowed_ips[0]' /etc/ygg-vless/access.json)" = 200:db8::111
 echo 'PASS: package + systemd + TUN + peer + VLESS Reality HTTPS + rename; identity, UUID and Reality keys retained'
