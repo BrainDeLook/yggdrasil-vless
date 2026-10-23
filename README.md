@@ -16,7 +16,7 @@ curl -fsSL https://raw.githubusercontent.com/BrainDeLook/yggdrasil-vless/main/in
 
 Если `curl` отсутствует: `apt-get update && apt-get install -y curl ca-certificates`.
 
-Загрузчик скачивает релиз **v1.1.0**, проверяет SHA256 и запускает мастер. Он спросит:
+Загрузчик скачивает релиз **v1.1.1**, проверяет SHA256 и запускает мастер. Он спросит:
 
 ```text
 Название подключения [Yggdrasil VLESS]: Моя нода NL
@@ -30,7 +30,12 @@ curl -fsSL https://raw.githubusercontent.com/BrainDeLook/yggdrasil-vless/main/in
 [6/6] Проверка подключения через VLESS + Reality…
 
 ГОТОВО — Моя нода NL
+
+[ ССЫЛКА · INCY / Xray / sing-box ]
 vless://…
+
+[ КОНФИГУРАЦИЯ ТАХИОНА · JSON с привязкой интерфейса ]
+{ …, "bind_interface": "yggdrasil" }
 ```
 
 Enter оставляет значение по умолчанию. Кириллица, пробелы и специальные символы в названии корректно кодируются в ссылке. Детальный вывод APT и служб сохраняется в закрытый журнал `/var/log/ygg-vless/install-*.log`, а на экране остаются этапы и результат. При ошибке мастер показывает причину или путь к журналу.
@@ -66,7 +71,9 @@ sudo ygg-vless --reality-server ДОМЕН
 
 При `route.auto_detect_interface=true` ядро может привязать прокси к WAN, хотя адрес сервера достижим через Yggdrasil. Настройка общего выходного интерфейса на Yggdrasil повлияет и на остальные прокси.
 
-Поэтому установщик сохраняет отдельный JSON для этой ноды с `bind_interface: "yggdrasil"`. Получить его на VPS:
+Поэтому установщик сохраняет отдельный JSON для этой ноды с `bind_interface: "yggdrasil"` и **автоматически показывает его целиком в рамке после ссылки**. В нём уже есть адрес, порт, UUID и параметры Reality. Содержимое выводится без префиксов и принудительных переносов, чтобы его можно было копировать. Повторно показать оба блока: `sudo ygg-vless --result`.
+
+Получить только JSON на VPS:
 
 ```bash
 sudo ygg-vless --tachyon
@@ -79,7 +86,8 @@ sudo ygg-vless --tachyon
 ## Управление
 
 ```bash
-sudo ygg-vless --show-link   # показать ссылку
+sudo ygg-vless --result      # показать ссылку и JSON в рамке
+sudo ygg-vless --show-link   # показать только ссылку
 sudo ygg-vless --tachyon     # JSON для Тахиона
 sudo ygg-vless --status      # состояние служб
 sudo ygg-vless --test        # проверка Reality, авторизации, DNS и HTTPS

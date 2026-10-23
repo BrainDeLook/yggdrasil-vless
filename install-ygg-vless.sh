@@ -8,7 +8,7 @@ APP=/opt/ygg-vless
 SERVICE=ygg-vless
 YGG_VERSION=0.5.14
 SB_VERSION=1.14.3
-INSTALLER_VERSION=1.1.0
+INSTALLER_VERSION=1.1.1
 MODE=install
 PORT=''
 NODE_NAME=''
@@ -29,6 +29,30 @@ on_error() {
         tail -n 12 "$INSTALL_LOG" >&3 || true
     fi
     exit 1
+}
+show_result() {
+    python3 - "$BASE" <<'PY'
+import json,pathlib,sys
+base=pathlib.Path(sys.argv[1])
+settings=json.loads((base/'settings.json').read_text(encoding='utf-8'))
+link=(base/'client.txt').read_text(encoding='utf-8').strip()
+tachyon=(base/'client-tachyon.json').read_text(encoding='utf-8').strip()
+def panel(title,content):
+    # Keep the payload unprefixed and unwrapped: copy/paste must preserve valid JSON/URI.
+    width=72
+    print('\n  ┌'+'─'*(width-2)+'┐')
+    print('  │ '+title.ljust(width-4)+' │')
+    print('  ├'+'─'*(width-2)+'┤\n')
+    print(content)
+    print('\n  └'+'─'*(width-2)+'┘')
+print('\n  ГОТОВО — '+settings['name'])
+print('  Адрес: '+settings['address']+'   Порт: '+str(settings['port']))
+panel('ССЫЛКА · INCY / Xray / sing-box',link)
+panel('КОНФИГУРАЦИЯ ТАХИОНА · JSON с привязкой интерфейса',tachyon)
+print('\n  Скопируйте JSON целиком, от { до }, в подключение Тахиона.')
+print('  В нём уже указано bind_interface: "yggdrasil".')
+print('  Если интерфейс на роутере называется иначе, замените только его имя.')
+PY
 }
 configure_wizard() {
     local old_name='Yggdrasil VLESS' old_port=1488 old_reality='www.microsoft.com' answer
@@ -96,6 +120,7 @@ while (($#)); do
         --status) MODE=status; shift ;;
         --test) MODE=test; shift ;;
         --tachyon) MODE=tachyon; shift ;;
+        --result) MODE=result; shift ;;
         --name) [[ $# -ge 2 ]] || die 'Не указано название после --name'; NODE_NAME=$2; shift 2 ;;
         --reality-server) [[ $# -ge 2 ]] || die 'Не указан домен после --reality-server'; REALITY_SERVER=$2; shift 2 ;;
         --yes|-y) ASSUME_YES=1; shift ;;
@@ -107,7 +132,7 @@ while (($#)); do
 Yggdrasil + VLESS Reality — интерактивный установщик
 sudo bash install-ygg-vless.sh
 sudo bash install-ygg-vless.sh --yes --name 'Моя нода' --port 1488
-sudo ygg-vless --show-link | --status | --test | --tachyon
+sudo ygg-vless --result | --show-link | --status | --test | --tachyon
 --peer URI             заменить список пиров (можно несколько)
 --reality-server HOST  домен TLS 1.3 для рукопожатия Reality
 --firewall-ready       нестандартный firewall уже настроен вручную
@@ -120,6 +145,7 @@ done
 [[ $EUID -eq 0 ]] || die 'Запустите от root: sudo bash install-ygg-vless.sh'
 if [[ "$MODE" == link ]]; then cat "$BASE/client.txt"; exit 0; fi
 if [[ "$MODE" == tachyon ]]; then cat "$BASE/client-tachyon.json"; exit 0; fi
+if [[ "$MODE" == result ]]; then show_result; exit 0; fi
 if [[ "$MODE" == status ]]; then
     systemctl --no-pager --full status yggdrasil "$SERVICE" || true
     ss -lntp
@@ -455,10 +481,6 @@ INSTALL_LOG="/var/log/ygg-vless/install-$(date -u +%Y%m%dT%H%M%S)-$$.log"
 : >"$INSTALL_LOG"
 printf '\n  Журнал установки: %s\n' "$INSTALL_LOG" >&3
 perform_install >>"$INSTALL_LOG" 2>&1
-printf '\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  ГОТОВО — %s\n  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n' "$NODE_NAME" >&3
-printf '  Ссылка для INCY / Xray / sing-box и других VLESS Reality клиентов:\n\n' >&3
-cat "$BASE/client.txt" >&3
-printf '\n  Название: %s\n  Адрес Yggdrasil: %s\n  Порт: %s\n' "$NODE_NAME" "$ADDRESS" "$PORT" >&3
-printf '\n  Тахион: нужен JSON с привязкой к интерфейсу Yggdrasil.\n  Получить его: sudo ygg-vless --tachyon\n\n' >&3
-printf '  Показать ссылку: sudo ygg-vless --show-link\n  Проверить ноду:  sudo ygg-vless --test\n  Статус:          sudo ygg-vless --status\n  Журнал:          %s\n\n' "$INSTALL_LOG" >&3
+show_result >&3
+printf '\n  Показать оба блока: sudo ygg-vless --result\n  Проверить ноду:    sudo ygg-vless --test\n  Статус:            sudo ygg-vless --status\n  Журнал:            %s\n\n' "$INSTALL_LOG" >&3
 printf '  На клиентском устройстве должен работать маршрут через Yggdrasil.\n  После обновления замените старую ссылку новой.\n' >&3
